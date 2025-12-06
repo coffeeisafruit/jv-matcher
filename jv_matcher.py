@@ -20,13 +20,59 @@ def clean_json_string(text):
     text = re.sub(r',\s*]', ']', text)
     text = re.sub(r',\s*}', '}', text)
 
-    # Fix unescaped newlines in strings (replace with space)
-    # This is tricky - we need to be careful not to break valid JSON
-
     # Remove control characters except \n \r \t
     text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
 
+    # Fix common issues with newlines in strings
+    # Replace actual newlines inside strings with \n escape
+    lines = text.split('\n')
+    text = ' '.join(lines)
+
+    # Fix multiple spaces
+    text = re.sub(r'  +', ' ', text)
+
     return text
+
+
+def extract_json_array(text):
+    """Try multiple methods to extract JSON array from text"""
+    # Method 1: Find [ and ] directly
+    start = text.find('[')
+    end = text.rfind(']')
+
+    if start != -1 and end != -1 and end > start:
+        json_str = text[start:end + 1]
+        json_str = clean_json_string(json_str)
+
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            pass
+
+    # Method 2: Try to find JSON in code blocks
+    code_match = re.search(r'```(?:json)?\s*(\[[\s\S]*?\])\s*```', text)
+    if code_match:
+        json_str = clean_json_string(code_match.group(1))
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            pass
+
+    # Method 3: More aggressive - extract anything between first [ and last ]
+    if start != -1 and end != -1:
+        json_str = text[start:end + 1]
+        # Remove all newlines and extra spaces
+        json_str = re.sub(r'\s+', ' ', json_str)
+        json_str = clean_json_string(json_str)
+
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError as e:
+            print(f"JSON parse error: {e}")
+            print(f"First 500 chars of JSON: {json_str[:500]}")
+            raise
+
+    return None
 
 class JVMatcher:
     """AI-powered JV partner matching system"""
@@ -100,26 +146,14 @@ Extract at least 20-30 profiles if that many people participated. Focus on peopl
             )
 
             content = response.choices[0].message.content
+            print(f"📝 Got response ({len(content)} chars)")
 
-            # Extract JSON from response
-            start = content.find('[')
-            end = content.rfind(']') + 1
+            # Extract JSON using robust parser
+            profiles = extract_json_array(content)
 
-            if start == -1 or end == 0:
+            if profiles is None:
                 print("❌ No JSON array found in response")
                 return []
-
-            json_str = content[start:end]
-            json_str = clean_json_string(json_str)
-
-            try:
-                profiles = json.loads(json_str)
-            except json.JSONDecodeError as e:
-                print(f"⚠️ JSON parse error: {e}")
-                print("Attempting to fix JSON...")
-                # Try more aggressive cleaning
-                json_str = re.sub(r'"\s*\n\s*"', '", "', json_str)
-                profiles = json.loads(json_str)
 
             print(f"✅ Extracted {len(profiles)} profiles")
             return profiles
@@ -127,7 +161,7 @@ Extract at least 20-30 profiles if that many people participated. Focus on peopl
         except json.JSONDecodeError as e:
             print(f"❌ JSON parsing failed: {str(e)}")
             print("The AI returned malformed JSON. Try again or use a different model.")
-            raise
+            return []
         except Exception as e:
             print(f"❌ Error extracting profiles: {str(e)}")
             raise
@@ -195,25 +229,14 @@ Return ONLY a JSON array of the top {num_matches} matches, sorted by score (high
             )
 
             content = response.choices[0].message.content
+            print(f"    📝 Got response ({len(content)} chars)")
 
-            # Extract JSON
-            start = content.find('[')
-            end = content.rfind(']') + 1
+            # Extract JSON using robust parser
+            matches = extract_json_array(content)
 
-            if start == -1 or end == 0:
+            if matches is None:
                 print(f"    ❌ No matches found for {person_name}")
                 return []
-
-            json_str = content[start:end]
-            json_str = clean_json_string(json_str)
-
-            try:
-                matches = json.loads(json_str)
-            except json.JSONDecodeError as e:
-                print(f"    ⚠️ JSON parse error: {e}")
-                print("    Attempting to fix JSON...")
-                json_str = re.sub(r'"\s*\n\s*"', '", "', json_str)
-                matches = json.loads(json_str)
 
             # Filter to only matches with score >= 60
             matches = [m for m in matches if m.get('score', 0) >= 60]
