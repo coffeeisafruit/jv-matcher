@@ -5,8 +5,28 @@ This file contains all the logic for profile extraction and matching
 
 import os
 import json
+import re
 from openai import OpenAI
 from datetime import datetime
+
+
+def clean_json_string(text):
+    """Clean common JSON formatting issues from AI responses"""
+    # Remove any markdown code blocks
+    text = re.sub(r'```json\s*', '', text)
+    text = re.sub(r'```\s*', '', text)
+
+    # Fix trailing commas before ] or }
+    text = re.sub(r',\s*]', ']', text)
+    text = re.sub(r',\s*}', '}', text)
+
+    # Fix unescaped newlines in strings (replace with space)
+    # This is tricky - we need to be careful not to break valid JSON
+
+    # Remove control characters except \n \r \t
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
+
+    return text
 
 class JVMatcher:
     """AI-powered JV partner matching system"""
@@ -80,21 +100,34 @@ Extract at least 20-30 profiles if that many people participated. Focus on peopl
             )
 
             content = response.choices[0].message.content
-            
+
             # Extract JSON from response
             start = content.find('[')
             end = content.rfind(']') + 1
-            
+
             if start == -1 or end == 0:
                 print("❌ No JSON array found in response")
                 return []
-            
+
             json_str = content[start:end]
-            profiles = json.loads(json_str)
-            
+            json_str = clean_json_string(json_str)
+
+            try:
+                profiles = json.loads(json_str)
+            except json.JSONDecodeError as e:
+                print(f"⚠️ JSON parse error: {e}")
+                print("Attempting to fix JSON...")
+                # Try more aggressive cleaning
+                json_str = re.sub(r'"\s*\n\s*"', '", "', json_str)
+                profiles = json.loads(json_str)
+
             print(f"✅ Extracted {len(profiles)} profiles")
             return profiles
-            
+
+        except json.JSONDecodeError as e:
+            print(f"❌ JSON parsing failed: {str(e)}")
+            print("The AI returned malformed JSON. Try again or use a different model.")
+            raise
         except Exception as e:
             print(f"❌ Error extracting profiles: {str(e)}")
             raise
@@ -170,16 +203,27 @@ Return ONLY a JSON array of the top {num_matches} matches, sorted by score (high
             if start == -1 or end == 0:
                 print(f"    ❌ No matches found for {person_name}")
                 return []
-            
+
             json_str = content[start:end]
-            matches = json.loads(json_str)
-            
+            json_str = clean_json_string(json_str)
+
+            try:
+                matches = json.loads(json_str)
+            except json.JSONDecodeError as e:
+                print(f"    ⚠️ JSON parse error: {e}")
+                print("    Attempting to fix JSON...")
+                json_str = re.sub(r'"\s*\n\s*"', '", "', json_str)
+                matches = json.loads(json_str)
+
             # Filter to only matches with score >= 60
             matches = [m for m in matches if m.get('score', 0) >= 60]
-            
+
             print(f"    ✅ Found {len(matches)} quality matches")
             return matches
-            
+
+        except json.JSONDecodeError as e:
+            print(f"    ❌ JSON parsing failed for {person_name}: {str(e)}")
+            return []
         except Exception as e:
             print(f"    ❌ Error generating matches for {person_name}: {str(e)}")
             return []
