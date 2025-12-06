@@ -1,0 +1,52 @@
+{
+  "participant": "Test User",
+  "date": "December 06, 2025 at 7:14 PM",
+  "profile": {
+    "what_you_do": "Business coach specializing in helping entrepreneurs scale their businesses through strategic partnerships and joint ventures.",
+    "who_you_serve": "Entrepreneurs and small business owners looking to grow their revenue through collaboration.",
+    "seeking": "Strategic partnerships, speaking opportunities, and collaboration with complementary service providers.",
+    "offering": "Coaching services, networking introductions, referrals, and revenue-sharing partnerships.",
+    "current_projects": "Launching a new coaching program focused on partnership development and scaling through JVs."
+  },
+  "matches": [
+    {
+      "num": 1,
+      "name": "John Smith",
+      "score": "95/100",
+      "type": "Strategic Partnership",
+      "fit": "John's expertise in digital marketing perfectly complements your coaching services. Both of you serve entrepreneurs and can create powerful synergies.",
+      "opportunity": "Joint venture on a coaching program launch combining business strategy with digital marketing implementation.",
+      "benefits": "Access to John's network of 5,000+ entrepreneurs, revenue sharing on joint programs, brand exposure through co-marketing.",
+      "revenue": "$50,000-$100,000 annually through collaboration",
+      "timing": "Immediate - John is launching a new program in Q1 2025 and is actively seeking partners.",
+      "message": "Hi John, I noticed we both serve entrepreneurs looking to scale their businesses. Your expertise in digital marketing combined with my coaching on strategic partnerships could create something powerful. I'd love to explore how we might collaborate on your upcoming Q1 launch. Would you be open to a brief call next week?",
+      "contact": "john@example.com, 555-123-4567, https://johnsmith.com"
+    },
+    {
+      "num": 2,
+      "name": "Sarah Johnson",
+      "score": "88/100",
+      "type": "Cross-Referral Partnership",
+      "fit": "Sarah's bookkeeping services are the perfect complement to your business coaching. Your clients need her services, and her clients need yours.",
+      "opportunity": "Cross-referral partnership where you recommend each other to your respective client bases.",
+      "benefits": "Qualified referrals from trusted source, no upfront costs, ongoing passive lead generation.",
+      "revenue": "$20,000-$40,000 annually in referred business",
+      "timing": "Medium - Can start anytime, no urgency but consistent opportunity.",
+      "message": "Hi Sarah, I work with entrepreneurs who often need bookkeeping support, and I think your services would be a perfect fit for my clients. I'd love to explore a referral partnership where we can recommend each other. Would you be interested in chatting about how this could work?",
+      "contact": "sarah@bookkeeping.com, 555-987-6543"
+    },
+    {
+      "num": 3,
+      "name": "Michael Brown",
+      "score": "82/100",
+      "type": "Publishing Partnership",
+      "fit": "Michael runs a publishing company focused on business books. Your coaching expertise could translate into a book that serves both your audiences.",
+      "opportunity": "Co-author or publish a book on partnership-based business growth.",
+      "benefits": "Authorship credential, passive income from book sales, speaking opportunities from book promotion.",
+      "revenue": "$15,000-$30,000 from book sales plus speaking fees",
+      "timing": "Long-term - Book projects take 6-12 months but ongoing benefits.",
+      "message": "Hi Michael, I've been developing content on how entrepreneurs can scale through strategic partnerships, and I think it could make a compelling book. I noticed you specialize in business books and would love to discuss whether this might be a fit for your publishing lineup.",
+      "contact": "michael@publishing.com, https://michaelbrown-publishing.com"
+    }
+  ]
+}

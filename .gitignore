@@ -32,6 +32,12 @@ ENV/
 # Outputs
 outputs/
 *.zip
+*.pdf
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
 
 # IDE
 .vscode/

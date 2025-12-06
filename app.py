@@ -5,12 +5,20 @@ AI-Powered Joint Venture Partner Matching
 
 import streamlit as st
 import os
+import tempfile
+import logging
 from datetime import datetime
 from io import BytesIO
 import zipfile
 
 # Import our matching engine
 from jv_matcher import JVMatcher
+
+# Import PDF generator
+from services.pdf_generator import PDFGenerator, PDFGenerationError
+
+# Setup logging
+logger = logging.getLogger(__name__)
 
 # Page config
 st.set_page_config(
@@ -44,23 +52,23 @@ st.markdown('<div class="main-header">🤝 JV Matcher</div>', unsafe_allow_html=
 st.markdown('<p style="text-align: center; font-size: 1.2rem; color: #666;">AI-Powered Joint Venture Partner Matching System</p>', unsafe_allow_html=True)
 
 # Check API key
-api_key = os.getenv("ANTHROPIC_API_KEY")
+api_key = os.getenv("OPENROUTER_API_KEY")
 
 if not api_key:
     st.error("""
     ⚠️ **API Key Not Configured**
-    
-    To use this app, you need to set your Anthropic API key:
-    
+
+    To use this app, you need to set your OpenRouter API key:
+
     1. Click the ⋮ menu (top right)
     2. Go to **Settings** → **Secrets**
     3. Add this line:
-    
+
     ```
-    ANTHROPIC_API_KEY = "sk-ant-your-key-here"
+    OPENROUTER_API_KEY = "sk-or-v1-your-key-here"
     ```
-    
-    Get your API key at: https://console.anthropic.com/settings/keys
+
+    Get your API key at: https://openrouter.ai/keys
     """)
     st.stop()
 
@@ -93,6 +101,63 @@ with st.sidebar:
     - Each person gets top 10 matches
     - Reports include ready-to-send messages
     """)
+
+def generate_and_download_pdf(member_name, member_data, matches):
+    """Generate PDF and offer download for a single member"""
+
+    try:
+        # Prepare data in correct format for PDF generator
+        pdf_data = {
+            "participant": member_name,
+            "date": datetime.now().strftime("%B %d, %Y at %I:%M %p"),
+            "profile": {
+                "what_you_do": member_data.get('profile', {}).get('what_they_do', ''),
+                "who_you_serve": member_data.get('profile', {}).get('who_they_serve', ''),
+                "seeking": member_data.get('profile', {}).get('seeking', ''),
+                "offering": member_data.get('profile', {}).get('offering', ''),
+                "current_projects": member_data.get('profile', {}).get('current_projects', '')
+            },
+            "matches": []
+        }
+
+        # Convert matches to PDF format
+        for i, match in enumerate(matches, 1):
+            pdf_match = {
+                "num": i,
+                "name": match.get('partner_name', 'Unknown'),
+                "score": f"{match.get('score', 0)}/100",
+                "type": match.get('match_type', 'Partnership'),
+                "fit": match.get('why_good_fit', ''),
+                "opportunity": match.get('collaboration_opportunity', ''),
+                "benefits": match.get('mutual_benefits', ''),
+                "revenue": match.get('revenue_potential', ''),
+                "timing": match.get('timing', ''),
+                "message": match.get('first_outreach_message', ''),
+                "contact": match.get('contact_method', '')
+            }
+            pdf_data["matches"].append(pdf_match)
+
+        # Create temporary directory for this session
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Generate PDF
+            generator = PDFGenerator(output_dir=temp_dir)
+            pdf_path = generator.generate(pdf_data, member_id=member_name.replace(' ', '_'))
+
+            # Read PDF bytes
+            with open(pdf_path, 'rb') as pdf_file:
+                pdf_bytes = pdf_file.read()
+
+            return pdf_bytes
+
+    except PDFGenerationError as e:
+        st.error(f"Could not generate PDF: {str(e)}")
+        logger.exception("PDF generation error")
+        return None
+    except Exception as e:
+        st.error(f"Unexpected error generating PDF: {str(e)}")
+        logger.exception("PDF generation error")
+        return None
+
 
 # Main tabs
 tab1, tab2 = st.tabs(["📤 Process Files", "📊 View Results"])
@@ -351,12 +416,38 @@ with tab2:
             
             # Download this report
             st.markdown("---")
-            st.download_button(
-                label=f"📄 Download {selected_person}'s Report",
-                data=reports[selected_person],
-                file_name=f"{selected_person.replace(' ', '_')}_JV_Report.md",
-                mime="text/markdown"
-            )
+
+            col_md, col_pdf = st.columns(2)
+
+            with col_md:
+                st.download_button(
+                    label=f"📄 Download Markdown Report",
+                    data=reports[selected_person],
+                    file_name=f"{selected_person.replace(' ', '_')}_JV_Report.md",
+                    mime="text/markdown",
+                    use_container_width=True
+                )
+
+            with col_pdf:
+                # Generate PDF download button
+                if st.button("📥 Generate PDF Report", key=f"pdf_{selected_person}", use_container_width=True):
+                    with st.spinner("Generating PDF..."):
+                        pdf_bytes = generate_and_download_pdf(
+                            selected_person,
+                            person_data,
+                            person_data['matches']
+                        )
+
+                        if pdf_bytes:
+                            st.download_button(
+                                label="📥 Download PDF Report",
+                                data=pdf_bytes,
+                                file_name=f"{selected_person.replace(' ', '_')}_JV_Report.pdf",
+                                mime="application/pdf",
+                                use_container_width=True,
+                                key=f"pdf_download_{selected_person}"
+                            )
+                            st.success("PDF generated successfully!")
     
     else:
         st.info("📤 No results yet. Process some files in the 'Process Files' tab first!")

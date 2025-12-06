@@ -5,21 +5,26 @@ This file contains all the logic for profile extraction and matching
 
 import os
 import json
-from anthropic import Anthropic
+from openai import OpenAI
 from datetime import datetime
 
 class JVMatcher:
     """AI-powered JV partner matching system"""
-    
+
     def __init__(self, api_key=None):
-        """Initialize with Anthropic API key"""
-        self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
-        
+        """Initialize with OpenRouter API key"""
+        self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
+
         if not self.api_key:
-            raise ValueError("ANTHROPIC_API_KEY not set. Add it in Streamlit Secrets.")
-        
-        self.client = Anthropic(api_key=self.api_key)
-        self.model = "claude-sonnet-4-20250514"
+            raise ValueError("OPENROUTER_API_KEY not set. Add it in Streamlit Secrets.")
+
+        # Use OpenRouter with OpenAI-compatible API
+        self.client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=self.api_key
+        )
+        # Use Claude via OpenRouter
+        self.model = "anthropic/claude-sonnet-4"
     
     def extract_profiles(self, transcript_content, chat_content):
         """Extract participant profiles from transcript and chat using Claude"""
@@ -68,13 +73,13 @@ Example format:
 Extract at least 20-30 profiles if that many people participated. Focus on people who shared substantial information."""
 
         try:
-            response = self.client.messages.create(
+            response = self.client.chat.completions.create(
                 model=self.model,
                 max_tokens=16000,
                 messages=[{"role": "user", "content": prompt}]
             )
-            
-            content = response.content[0].text
+
+            content = response.choices[0].message.content
             
             # Extract JSON from response
             start = content.find('[')
@@ -150,18 +155,18 @@ Return ONLY a JSON array of the top {num_matches} matches, sorted by score (high
 ]"""
 
         try:
-            response = self.client.messages.create(
+            response = self.client.chat.completions.create(
                 model=self.model,
                 max_tokens=8000,
                 messages=[{"role": "user", "content": prompt}]
             )
-            
-            content = response.content[0].text
-            
+
+            content = response.choices[0].message.content
+
             # Extract JSON
             start = content.find('[')
             end = content.rfind(']') + 1
-            
+
             if start == -1 or end == 0:
                 print(f"    ❌ No matches found for {person_name}")
                 return []
