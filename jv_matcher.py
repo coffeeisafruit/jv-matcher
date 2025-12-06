@@ -23,8 +23,8 @@ class JVMatcher:
             base_url="https://openrouter.ai/api/v1",
             api_key=self.api_key
         )
-        # Use Claude via OpenRouter
-        self.model = "anthropic/claude-sonnet-4"
+        # Use Amazon Nova Lite (free) via OpenRouter
+        self.model = "amazon/nova-lite-v1"
     
     def extract_profiles(self, transcript_content, chat_content):
         """Extract participant profiles from transcript and chat using Claude"""
