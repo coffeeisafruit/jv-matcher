@@ -43,8 +43,8 @@ class JVMatcher:
             base_url="https://openrouter.ai/api/v1",
             api_key=self.api_key
         )
-        # Use Llama 3.3 70B (free) via OpenRouter
-        self.model = "meta-llama/llama-3.3-70b-instruct:free"
+        # Use Google Gemini Flash (free) via OpenRouter - fast and reliable
+        self.model = "google/gemini-2.0-flash-exp:free"
     
     def extract_profiles(self, transcript_content, chat_content):
         """Extract participant profiles from transcript and chat using Claude"""
