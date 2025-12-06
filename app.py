@@ -118,7 +118,10 @@ with tab1:
             key='transcripts',
             help="The closed caption / transcript files from Zoom"
         )
+        
+        # Save to session state when files are uploaded
         if transcript_files:
+            st.session_state['uploaded_transcripts'] = transcript_files
             st.success(f"✅ {len(transcript_files)} transcript file(s) uploaded")
             for f in transcript_files:
                 st.text(f"  📄 {f.name}")
@@ -132,7 +135,10 @@ with tab1:
             key='chats',
             help="The saved chat files from Zoom"
         )
+        
+        # Save to session state when files are uploaded
         if chat_files:
+            st.session_state['uploaded_chats'] = chat_files
             st.success(f"✅ {len(chat_files)} chat file(s) uploaded")
             for f in chat_files:
                 st.text(f"  💬 {f.name}")
@@ -152,8 +158,16 @@ with tab1:
     # Process button
     st.markdown("---")
     
-    if transcript_files and chat_files:
+    # Check if files are available (either just uploaded or in session state)
+    has_transcripts = 'uploaded_transcripts' in st.session_state and st.session_state['uploaded_transcripts']
+    has_chats = 'uploaded_chats' in st.session_state and st.session_state['uploaded_chats']
+    
+    if has_transcripts and has_chats:
         if st.button("🚀 Process Files & Generate Matches", type="primary", use_container_width=True):
+            
+            # Get files from session state (these persist across reruns)
+            transcript_files_to_process = st.session_state['uploaded_transcripts']
+            chat_files_to_process = st.session_state['uploaded_chats']
             
             # Create progress indicators
             progress_bar = st.progress(0)
@@ -170,9 +184,10 @@ with tab1:
                 status_text.text("📊 Processing files and extracting profiles...")
                 progress_bar.progress(10)
                 
+                # The print statements in process_files() will show in Streamlit logs
                 results = matcher.process_files(
-                    transcript_files,
-                    chat_files,
+                    transcript_files_to_process,
+                    chat_files_to_process,
                     num_matches=num_matches
                 )
                 
@@ -224,6 +239,14 @@ with tab1:
                 - Verify files are from Zoom (transcripts and chats)
                 - Try with smaller files first
                 """)
+                
+                # Print full error to logs for debugging
+                import traceback
+                print("="*70)
+                print("ERROR DETAILS:")
+                print("="*70)
+                traceback.print_exc()
+                print("="*70)
     else:
         st.info("👆 Upload both transcript and chat files to get started")
 
