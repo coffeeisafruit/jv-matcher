@@ -118,8 +118,8 @@ class JVMatcher:
             base_url="https://openrouter.ai/api/v1",
             api_key=self.api_key
         )
-        # Use NVIDIA Nemotron Nano 12B (free) via OpenRouter - 128K context
-        self.model = "nvidia/nemotron-nano-12b-v2-v1:free"
+        # Use Arcee Trinity Mini (free) via OpenRouter - 131K context
+        self.model = "arcee-ai/trinity-mini:free"
     
     def extract_profiles(self, transcript_content, chat_content):
         """Extract participant profiles from transcript and chat using Claude"""
