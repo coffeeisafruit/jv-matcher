@@ -386,11 +386,11 @@ Return ONLY a JSON array of the top {num_matches} matches, sorted by score (high
 **What you're offering:**
 """
         
-        for offering in profile.get('offerings', []):
+        for offering in (profile.get('offerings') or []):
             report += f"- {offering}\n"
-        
+
         report += "\n**What you're seeking:**\n"
-        for seeking in profile.get('seeking', []):
+        for seeking in (profile.get('seeking') or []):
             report += f"- {seeking}\n"
         
         if profile.get('current_projects'):
