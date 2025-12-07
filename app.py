@@ -633,17 +633,21 @@ def process_transcripts_with_database(uploaded_files, matches_per_person, save_t
 
             for profile in all_profiles:
                 # Check if profile already exists
-                existing = directory_service.get_profiles(search=profile['name'], limit=1)
+                existing = directory_service.get_profiles(search=profile.get('name', ''), limit=1)
 
-                if not existing['data']:
+                if not existing.get('data'):
+                    # Extract keywords from content if available
+                    content = profile.get('content', profile.get('summary', ''))
+                    keywords = matcher._extract_keywords(content)[:5] if content else []
+
                     # Create new profile
                     result = directory_service.create_profile({
-                        'name': profile['name'],
+                        'name': profile.get('name', 'Unknown'),
                         'status': 'Pending',
-                        'business_focus': ', '.join(matcher._extract_keywords(profile['content'])[:5]),
+                        'business_focus': ', '.join(keywords) if keywords else None,
                         'source': 'transcript_extraction'
                     })
-                    if result['success']:
+                    if result.get('success'):
                         profiles_saved += 1
 
         status_text.text("Finding JV partner matches...")
