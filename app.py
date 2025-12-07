@@ -73,9 +73,15 @@ if 'results' not in st.session_state:
     st.session_state.results = None
 if 'uploaded_files' not in st.session_state:
     st.session_state.uploaded_files = []
+if 'current_page' not in st.session_state:
+    st.session_state.current_page = "🏠 Home"
 
 # Page options - defined globally for consistency
 PAGES = ["🏠 Home", "📤 Process Files", "📊 View Results", "❓ Help"]
+
+def go_to_page(page_name):
+    """Callback to navigate to a page"""
+    st.session_state.current_page = page_name
 
 def main():
     # Header
@@ -86,11 +92,19 @@ def main():
     with st.sidebar:
         st.header("📋 Navigation")
 
+        # Find current index
+        current_idx = PAGES.index(st.session_state.current_page) if st.session_state.current_page in PAGES else 0
+
         page = st.radio(
             "Choose a page:",
             PAGES,
-            key="nav_page"
+            index=current_idx,
+            key="nav_radio",
+            on_change=lambda: setattr(st.session_state, 'current_page', st.session_state.nav_radio)
         )
+
+        # Sync radio selection to current_page
+        st.session_state.current_page = page
 
         st.markdown("---")
         st.header("ℹ️ Quick Info")
@@ -102,14 +116,15 @@ def main():
         - Generate personalized reports
         """)
 
-    # Route to appropriate page
-    if page == "🏠 Home":
+    # Route to appropriate page using current_page from session state
+    current = st.session_state.current_page
+    if current == "🏠 Home":
         show_home()
-    elif page == "📤 Process Files":
+    elif current == "📤 Process Files":
         show_process_files()
-    elif page == "📊 View Results":
+    elif current == "📊 View Results":
         show_results()
-    elif page == "❓ Help":
+    elif current == "❓ Help":
         show_help()
 
 def show_home():
@@ -126,9 +141,8 @@ def show_home():
             <p>Drag & drop your meeting transcript files</p>
         </div>
         """, unsafe_allow_html=True)
-        if st.button("Go to Upload →", key="home_upload", use_container_width=True):
-            st.session_state.nav_page = "📤 Process Files"
-            st.rerun()
+        st.button("Go to Upload →", key="home_upload", use_container_width=True,
+                  on_click=go_to_page, args=("📤 Process Files",))
 
     with col2:
         st.markdown("""
@@ -137,9 +151,8 @@ def show_home():
             <p>AI extracts profiles and finds matches</p>
         </div>
         """, unsafe_allow_html=True)
-        if st.button("Go to Process →", key="home_process", use_container_width=True):
-            st.session_state.nav_page = "📤 Process Files"
-            st.rerun()
+        st.button("Go to Process →", key="home_process", use_container_width=True,
+                  on_click=go_to_page, args=("📤 Process Files",))
 
     with col3:
         st.markdown("""
@@ -148,9 +161,8 @@ def show_home():
             <p>Get personalized reports in one click</p>
         </div>
         """, unsafe_allow_html=True)
-        if st.button("View Results →", key="home_download", use_container_width=True):
-            st.session_state.nav_page = "📊 View Results"
-            st.rerun()
+        st.button("View Results →", key="home_download", use_container_width=True,
+                  on_click=go_to_page, args=("📊 View Results",))
 
     st.markdown("---")
 
@@ -186,9 +198,8 @@ def show_home():
 
     st.markdown("---")
 
-    if st.button("🚀 Get Started - Process Files Now", use_container_width=True, type="primary"):
-        st.session_state.nav_page = "📤 Process Files"
-        st.rerun()
+    st.button("🚀 Get Started - Process Files Now", use_container_width=True, type="primary",
+              on_click=go_to_page, args=("📤 Process Files",))
 
 def show_process_files():
     """File upload and processing page"""
