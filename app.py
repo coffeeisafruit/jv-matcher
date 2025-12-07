@@ -92,19 +92,20 @@ def main():
     with st.sidebar:
         st.header("📋 Navigation")
 
-        # Find current index
+        # Show radio for navigation - clicking updates current_page via callback
+        def on_radio_change():
+            st.session_state.current_page = st.session_state.nav_radio
+
+        # Find current index based on session state
         current_idx = PAGES.index(st.session_state.current_page) if st.session_state.current_page in PAGES else 0
 
-        page = st.radio(
+        st.radio(
             "Choose a page:",
             PAGES,
             index=current_idx,
             key="nav_radio",
-            on_change=lambda: setattr(st.session_state, 'current_page', st.session_state.nav_radio)
+            on_change=on_radio_change
         )
-
-        # Sync radio selection to current_page
-        st.session_state.current_page = page
 
         st.markdown("---")
         st.header("ℹ️ Quick Info")
