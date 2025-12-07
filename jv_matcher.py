@@ -118,8 +118,8 @@ class JVMatcher:
             base_url="https://openrouter.ai/api/v1",
             api_key=self.api_key
         )
-        # Use Llama 3.1 8B (free) via OpenRouter - 128K context window
-        self.model = "meta-llama/llama-3.1-8b-instruct:free"
+        # Use Qwen 2.5 7B (free) via OpenRouter
+        self.model = "qwen/qwen-2.5-7b-instruct:free"
     
     def extract_profiles(self, transcript_content, chat_content):
         """Extract participant profiles from transcript and chat using Claude"""
