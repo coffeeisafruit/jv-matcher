@@ -118,8 +118,8 @@ class JVMatcher:
             base_url="https://openrouter.ai/api/v1",
             api_key=self.api_key
         )
-        # Use DeepSeek Chat (free) via OpenRouter
-        self.model = "deepseek/deepseek-chat:free"
+        # Use Amazon Nova 2 Lite (free) via OpenRouter - 1M context window
+        self.model = "amazon/nova-2-lite-v1:free"
     
     def extract_profiles(self, transcript_content, chat_content):
         """Extract participant profiles from transcript and chat using Claude"""
