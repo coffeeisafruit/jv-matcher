@@ -73,38 +73,24 @@ if 'results' not in st.session_state:
     st.session_state.results = None
 if 'uploaded_files' not in st.session_state:
     st.session_state.uploaded_files = []
-if 'current_page' not in st.session_state:
-    st.session_state.current_page = "🏠 Home"
 
-def navigate_to(page_name):
-    """Navigate to a specific page"""
-    st.session_state.current_page = page_name
+# Page options - defined globally for consistency
+PAGES = ["🏠 Home", "📤 Process Files", "📊 View Results", "❓ Help"]
 
 def main():
     # Header
     st.markdown('<div class="main-header">🤝 JV Matcher</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">AI-Powered Joint Venture Partner Matching System</div>', unsafe_allow_html=True)
 
-    # Page options
-    pages = ["🏠 Home", "📤 Process Files", "📊 View Results", "❓ Help"]
-
     # Sidebar
     with st.sidebar:
         st.header("📋 Navigation")
 
-        # Get current index for default
-        current_index = pages.index(st.session_state.current_page) if st.session_state.current_page in pages else 0
-
         page = st.radio(
             "Choose a page:",
-            pages,
-            index=current_index,
-            key="nav_radio"
+            PAGES,
+            key="nav_page"
         )
-
-        # Update session state when radio changes
-        if page != st.session_state.current_page:
-            st.session_state.current_page = page
 
         st.markdown("---")
         st.header("ℹ️ Quick Info")
@@ -116,14 +102,14 @@ def main():
         - Generate personalized reports
         """)
 
-    # Route to appropriate page based on session state
-    if st.session_state.current_page == "🏠 Home":
+    # Route to appropriate page
+    if page == "🏠 Home":
         show_home()
-    elif st.session_state.current_page == "📤 Process Files":
+    elif page == "📤 Process Files":
         show_process_files()
-    elif st.session_state.current_page == "📊 View Results":
+    elif page == "📊 View Results":
         show_results()
-    elif st.session_state.current_page == "❓ Help":
+    elif page == "❓ Help":
         show_help()
 
 def show_home():
@@ -141,7 +127,7 @@ def show_home():
         </div>
         """, unsafe_allow_html=True)
         if st.button("Go to Upload →", key="home_upload", use_container_width=True):
-            st.session_state.current_page = "📤 Process Files"
+            st.session_state.nav_page = "📤 Process Files"
             st.rerun()
 
     with col2:
@@ -152,7 +138,7 @@ def show_home():
         </div>
         """, unsafe_allow_html=True)
         if st.button("Go to Process →", key="home_process", use_container_width=True):
-            st.session_state.current_page = "📤 Process Files"
+            st.session_state.nav_page = "📤 Process Files"
             st.rerun()
 
     with col3:
@@ -163,7 +149,7 @@ def show_home():
         </div>
         """, unsafe_allow_html=True)
         if st.button("View Results →", key="home_download", use_container_width=True):
-            st.session_state.current_page = "📊 View Results"
+            st.session_state.nav_page = "📊 View Results"
             st.rerun()
 
     st.markdown("---")
@@ -201,7 +187,7 @@ def show_home():
     st.markdown("---")
 
     if st.button("🚀 Get Started - Process Files Now", use_container_width=True, type="primary"):
-        st.session_state.current_page = "📤 Process Files"
+        st.session_state.nav_page = "📤 Process Files"
         st.rerun()
 
 def show_process_files():
