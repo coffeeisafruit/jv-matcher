@@ -110,15 +110,15 @@ class JVMatcher:
         Generate a summary/profile for a person
         In production, this would use AI/LLM
         """
-        content = profile['content']
-        word_count = profile['word_count']
-        
+        content = profile.get('content', '')
+        word_count = profile.get('word_count', len(content.split()) if content else 0)
+
         # Extract key topics (simple keyword extraction)
         # In production, use NLP/AI for better extraction
-        keywords = self._extract_keywords(content)
-        
+        keywords = self._extract_keywords(content) if content else []
+
         return {
-            'name': profile['name'],
+            'name': profile.get('name', 'Unknown'),
             'word_count': word_count,
             'keywords': keywords[:10],  # Top 10 keywords
             'summary': content[:500] + '...' if len(content) > 500 else content
@@ -193,12 +193,13 @@ class JVMatcher:
         
         for i, match in enumerate(matches, 1):
             match_profile = match['profile']
+            summary = match_profile.get('summary', match_profile.get('content', '')[:300] if match_profile.get('content') else 'No summary available')
             report_lines.extend([
-                f"### {i}. {match_profile['name']}",
+                f"### {i}. {match_profile.get('name', 'Unknown')}",
                 f"\n**Match Score:** {match['score']:.1%}",
                 f"\n**Why This Match:** {match['match_reason']}",
                 f"\n**Shared Interests:** {', '.join(match.get('common_keywords', [])) if match.get('common_keywords') else 'Complementary skills'}",
-                f"\n**Profile Summary:** {match_profile.get('summary', match_profile['content'][:300])}...",
+                f"\n**Profile Summary:** {summary}...",
                 "\n---\n"
             ])
         
