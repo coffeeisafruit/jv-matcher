@@ -36,27 +36,37 @@ def clean_json_string(text):
 
 def extract_json_array(text):
     """Try multiple methods to extract JSON array from text"""
+    print(f"🔍 Attempting to extract JSON from {len(text)} chars of text")
+    print(f"📄 First 200 chars of response: {text[:200]}")
+
     # Method 1: Find [ and ] directly
     start = text.find('[')
     end = text.rfind(']')
 
+    print(f"📍 Found '[' at position {start}, ']' at position {end}")
+
     if start != -1 and end != -1 and end > start:
         json_str = text[start:end + 1]
         json_str = clean_json_string(json_str)
+        print(f"📋 Extracted JSON string length: {len(json_str)}")
 
         try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            pass
+            result = json.loads(json_str)
+            print(f"✅ Method 1 success: parsed {len(result)} items")
+            return result
+        except json.JSONDecodeError as e:
+            print(f"⚠️ Method 1 failed: {e}")
 
     # Method 2: Try to find JSON in code blocks
     code_match = re.search(r'```(?:json)?\s*(\[[\s\S]*?\])\s*```', text)
     if code_match:
         json_str = clean_json_string(code_match.group(1))
         try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            pass
+            result = json.loads(json_str)
+            print(f"✅ Method 2 success: parsed {len(result)} items")
+            return result
+        except json.JSONDecodeError as e:
+            print(f"⚠️ Method 2 failed: {e}")
 
     # Method 3: More aggressive - extract anything between first [ and last ]
     if start != -1 and end != -1:
@@ -66,12 +76,31 @@ def extract_json_array(text):
         json_str = clean_json_string(json_str)
 
         try:
-            return json.loads(json_str)
+            result = json.loads(json_str)
+            print(f"✅ Method 3 success: parsed {len(result)} items")
+            return result
         except json.JSONDecodeError as e:
-            print(f"JSON parse error: {e}")
-            print(f"First 500 chars of JSON: {json_str[:500]}")
-            raise
+            print(f"❌ Method 3 failed: {e}")
+            print(f"📄 First 500 chars of JSON: {json_str[:500]}")
+            print(f"📄 Last 500 chars of JSON: {json_str[-500:]}")
 
+    # Method 4: Try parsing individual objects if array fails
+    print("🔄 Attempting Method 4: individual object extraction")
+    objects = []
+    obj_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
+    for match in re.finditer(obj_pattern, text):
+        try:
+            obj = json.loads(match.group())
+            if 'name' in obj:  # Looks like a profile
+                objects.append(obj)
+        except json.JSONDecodeError:
+            continue
+
+    if objects:
+        print(f"✅ Method 4 success: extracted {len(objects)} individual objects")
+        return objects
+
+    print("❌ All JSON extraction methods failed")
     return None
 
 class JVMatcher:
@@ -139,6 +168,7 @@ Example format:
 Extract at least 20-30 profiles if that many people participated. Focus on people who shared substantial information."""
 
         try:
+            print(f"🤖 Calling model: {self.model}")
             response = self.client.chat.completions.create(
                 model=self.model,
                 max_tokens=16000,
@@ -148,14 +178,25 @@ Extract at least 20-30 profiles if that many people participated. Focus on peopl
             content = response.choices[0].message.content
             print(f"📝 Got response ({len(content)} chars)")
 
+            # Log the full response for debugging (first 1000 chars)
+            print(f"📄 Response preview: {content[:1000]}...")
+
             # Extract JSON using robust parser
             profiles = extract_json_array(content)
 
             if profiles is None:
                 print("❌ No JSON array found in response")
+                print(f"📄 Full response was: {content[:2000]}")
+                return []
+
+            if len(profiles) == 0:
+                print("⚠️ JSON parsed but array was empty")
                 return []
 
             print(f"✅ Extracted {len(profiles)} profiles")
+            # Log first profile as sample
+            if profiles:
+                print(f"📋 Sample profile: {json.dumps(profiles[0], indent=2)[:500]}")
             return profiles
 
         except json.JSONDecodeError as e:
@@ -164,6 +205,8 @@ Extract at least 20-30 profiles if that many people participated. Focus on peopl
             return []
         except Exception as e:
             print(f"❌ Error extracting profiles: {str(e)}")
+            import traceback
+            traceback.print_exc()
             raise
     
     def generate_matches(self, person_profile, all_profiles, num_matches=10):
