@@ -73,20 +73,39 @@ if 'results' not in st.session_state:
     st.session_state.results = None
 if 'uploaded_files' not in st.session_state:
     st.session_state.uploaded_files = []
+if 'current_page' not in st.session_state:
+    st.session_state.current_page = "🏠 Home"
+
+def navigate_to(page_name):
+    """Navigate to a specific page"""
+    st.session_state.current_page = page_name
 
 def main():
     # Header
     st.markdown('<div class="main-header">🤝 JV Matcher</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">AI-Powered Joint Venture Partner Matching System</div>', unsafe_allow_html=True)
-    
+
+    # Page options
+    pages = ["🏠 Home", "📤 Process Files", "📊 View Results", "❓ Help"]
+
     # Sidebar
     with st.sidebar:
         st.header("📋 Navigation")
+
+        # Get current index for default
+        current_index = pages.index(st.session_state.current_page) if st.session_state.current_page in pages else 0
+
         page = st.radio(
             "Choose a page:",
-            ["🏠 Home", "📤 Process Files", "📊 View Results", "❓ Help"]
+            pages,
+            index=current_index,
+            key="nav_radio"
         )
-        
+
+        # Update session state when radio changes
+        if page != st.session_state.current_page:
+            st.session_state.current_page = page
+
         st.markdown("---")
         st.header("ℹ️ Quick Info")
         st.info("""
@@ -96,23 +115,24 @@ def main():
         - Find ideal JV partners
         - Generate personalized reports
         """)
-    
-    # Route to appropriate page
-    if page == "🏠 Home":
+
+    # Route to appropriate page based on session state
+    if st.session_state.current_page == "🏠 Home":
         show_home()
-    elif page == "📤 Process Files":
+    elif st.session_state.current_page == "📤 Process Files":
         show_process_files()
-    elif page == "📊 View Results":
+    elif st.session_state.current_page == "📊 View Results":
         show_results()
-    elif page == "❓ Help":
+    elif st.session_state.current_page == "❓ Help":
         show_help()
 
 def show_home():
     """Home page with overview"""
     st.markdown("## Welcome to JV Matcher!")
-    
+
+    # Clickable action cards
     col1, col2, col3 = st.columns(3)
-    
+
     with col1:
         st.markdown("""
         <div class="stat-box">
@@ -120,7 +140,10 @@ def show_home():
             <p>Drag & drop your meeting transcript files</p>
         </div>
         """, unsafe_allow_html=True)
-    
+        if st.button("Go to Upload →", key="home_upload", use_container_width=True):
+            st.session_state.current_page = "📤 Process Files"
+            st.rerun()
+
     with col2:
         st.markdown("""
         <div class="stat-box">
@@ -128,7 +151,10 @@ def show_home():
             <p>AI extracts profiles and finds matches</p>
         </div>
         """, unsafe_allow_html=True)
-    
+        if st.button("Go to Process →", key="home_process", use_container_width=True):
+            st.session_state.current_page = "📤 Process Files"
+            st.rerun()
+
     with col3:
         st.markdown("""
         <div class="stat-box">
@@ -136,27 +162,30 @@ def show_home():
             <p>Get personalized reports in one click</p>
         </div>
         """, unsafe_allow_html=True)
-    
+        if st.button("View Results →", key="home_download", use_container_width=True):
+            st.session_state.current_page = "📊 View Results"
+            st.rerun()
+
     st.markdown("---")
-    
+
     st.markdown("## 🚀 How It Works")
-    
+
     steps = [
         ("1️⃣ Upload Files", "Upload one or more meeting transcript files. Supports .txt, .md, and other text formats."),
         ("2️⃣ Process", "Click the 'Process Files' button. Our AI will extract profiles from each participant and analyze their interests."),
         ("3️⃣ Match", "The system finds 5-10 ideal JV partners for each person based on shared interests and complementary skills."),
         ("4️⃣ Download", "Get a ZIP file with personalized reports for each participant, ready to email to your customers.")
     ]
-    
+
     for step_num, description in steps:
         st.markdown(f"### {step_num}")
         st.markdown(description)
         st.markdown("")
-    
+
     st.markdown("---")
-    
+
     st.markdown("## 💡 Key Features")
-    
+
     features = [
         "✅ **Zero technical knowledge needed** - Just drag, drop, and click",
         "✅ **Handles large files** - Processes 2-3 hour meetings with ease",
@@ -165,14 +194,14 @@ def show_home():
         "✅ **Visual progress tracking** - See exactly what's happening",
         "✅ **One-click downloads** - Get all reports in a single ZIP file"
     ]
-    
+
     for feature in features:
         st.markdown(feature)
-    
+
     st.markdown("---")
-    
-    if st.button("🚀 Get Started - Process Files Now", use_container_width=True):
-        st.session_state.page = "📤 Process Files"
+
+    if st.button("🚀 Get Started - Process Files Now", use_container_width=True, type="primary"):
+        st.session_state.current_page = "📤 Process Files"
         st.rerun()
 
 def show_process_files():
