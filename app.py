@@ -73,16 +73,13 @@ if 'results' not in st.session_state:
     st.session_state.results = None
 if 'uploaded_files' not in st.session_state:
     st.session_state.uploaded_files = []
-if 'current_page' not in st.session_state:
-    st.session_state.current_page = "🏠 Home"
 
 # Page options - defined globally for consistency
 PAGES = ["🏠 Home", "📤 Process Files", "📊 View Results", "❓ Help"]
 
 def go_to_page(page_name):
-    """Callback to navigate to a page"""
-    st.session_state.current_page = page_name
-    st.session_state.nav_radio = page_name  # Also update radio to stay in sync
+    """Callback to navigate to a page - updates the radio widget's value"""
+    st.session_state.nav_radio = page_name
 
 def main():
     # Header
@@ -93,17 +90,17 @@ def main():
     with st.sidebar:
         st.header("📋 Navigation")
 
+        # Initialize nav_radio if not set
+        if "nav_radio" not in st.session_state:
+            st.session_state.nav_radio = "🏠 Home"
+
         # Show radio for navigation - clicking updates current_page via callback
         def on_radio_change():
             st.session_state.current_page = st.session_state.nav_radio
 
-        # Find current index based on session state
-        current_idx = PAGES.index(st.session_state.current_page) if st.session_state.current_page in PAGES else 0
-
         st.radio(
             "Choose a page:",
             PAGES,
-            index=current_idx,
             key="nav_radio",
             on_change=on_radio_change
         )
@@ -118,8 +115,8 @@ def main():
         - Generate personalized reports
         """)
 
-    # Route to appropriate page using current_page from session state
-    current = st.session_state.current_page
+    # Route to appropriate page using nav_radio from session state
+    current = st.session_state.nav_radio
     if current == "🏠 Home":
         show_home()
     elif current == "📤 Process Files":
