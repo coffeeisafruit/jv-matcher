@@ -82,6 +82,7 @@ PAGES = ["🏠 Home", "📤 Process Files", "📊 View Results", "❓ Help"]
 def go_to_page(page_name):
     """Callback to navigate to a page"""
     st.session_state.current_page = page_name
+    st.session_state.nav_radio = page_name  # Also update radio to stay in sync
 
 def main():
     # Header
