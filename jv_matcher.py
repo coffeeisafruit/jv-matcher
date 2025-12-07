@@ -118,8 +118,8 @@ class JVMatcher:
             base_url="https://openrouter.ai/api/v1",
             api_key=self.api_key
         )
-        # Use Gemma 2 9B (free) via OpenRouter - good balance of speed and quality
-        self.model = "google/gemma-2-9b-it:free"
+        # Use Mistral 7B (free) via OpenRouter
+        self.model = "mistralai/mistral-7b-instruct:free"
     
     def extract_profiles(self, transcript_content, chat_content):
         """Extract participant profiles from transcript and chat using Claude"""
