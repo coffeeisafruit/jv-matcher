@@ -118,8 +118,8 @@ class JVMatcher:
             base_url="https://openrouter.ai/api/v1",
             api_key=self.api_key
         )
-        # Use Mistral 7B (free) via OpenRouter
-        self.model = "mistralai/mistral-7b-instruct:free"
+        # Use Google Gemini Flash (free) via OpenRouter - large context window
+        self.model = "google/gemini-2.0-flash-exp:free"
     
     def extract_profiles(self, transcript_content, chat_content):
         """Extract participant profiles from transcript and chat using Claude"""
@@ -129,10 +129,10 @@ class JVMatcher:
         prompt = f"""Analyze this JV Directory networking meeting and extract detailed profiles for ALL participants who shared meaningful information.
 
 TRANSCRIPT (what people said):
-{transcript_content[:80000]}
+{transcript_content[:50000]}
 
 CHAT LOG (contact info and offerings):
-{chat_content[:40000]}
+{chat_content[:20000]}
 
 For each person who actively participated (introduced themselves, asked questions, shared their business), create a profile with these fields:
 
@@ -171,7 +171,7 @@ Extract at least 20-30 profiles if that many people participated. Focus on peopl
             print(f"🤖 Calling model: {self.model}")
             response = self.client.chat.completions.create(
                 model=self.model,
-                max_tokens=16000,
+                max_tokens=8000,
                 messages=[{"role": "user", "content": prompt}]
             )
 
