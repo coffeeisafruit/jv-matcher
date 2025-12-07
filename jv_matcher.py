@@ -1,445 +1,270 @@
+#!/usr/bin/env python3
 """
-JV Matcher - Complete AI-Powered Matching Engine
-This file contains all the logic for profile extraction and matching
+JV Matcher - Core processing logic
+Extracts profiles from meeting transcripts and matches people for joint ventures
 """
-
 import os
 import json
 import re
-from openai import OpenAI
+from typing import List, Dict, Tuple
 from datetime import datetime
+import zipfile
+from pathlib import Path
 
-
-def clean_json_string(text):
-    """Clean common JSON formatting issues from AI responses"""
-    # Remove any markdown code blocks
-    text = re.sub(r'```json\s*', '', text)
-    text = re.sub(r'```\s*', '', text)
-
-    # Fix trailing commas before ] or }
-    text = re.sub(r',\s*]', ']', text)
-    text = re.sub(r',\s*}', '}', text)
-
-    # Remove control characters except \n \r \t
-    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', text)
-
-    # Fix common issues with newlines in strings
-    # Replace actual newlines inside strings with \n escape
-    lines = text.split('\n')
-    text = ' '.join(lines)
-
-    # Fix multiple spaces
-    text = re.sub(r'  +', ' ', text)
-
-    return text
-
-
-def extract_json_array(text):
-    """Try multiple methods to extract JSON array from text"""
-    print(f"🔍 Attempting to extract JSON from {len(text)} chars of text")
-    print(f"📄 First 200 chars of response: {text[:200]}")
-
-    # Method 1: Find [ and ] directly
-    start = text.find('[')
-    end = text.rfind(']')
-
-    print(f"📍 Found '[' at position {start}, ']' at position {end}")
-
-    if start != -1 and end != -1 and end > start:
-        json_str = text[start:end + 1]
-        json_str = clean_json_string(json_str)
-        print(f"📋 Extracted JSON string length: {len(json_str)}")
-
-        try:
-            result = json.loads(json_str)
-            print(f"✅ Method 1 success: parsed {len(result)} items")
-            return result
-        except json.JSONDecodeError as e:
-            print(f"⚠️ Method 1 failed: {e}")
-
-    # Method 2: Try to find JSON in code blocks
-    code_match = re.search(r'```(?:json)?\s*(\[[\s\S]*?\])\s*```', text)
-    if code_match:
-        json_str = clean_json_string(code_match.group(1))
-        try:
-            result = json.loads(json_str)
-            print(f"✅ Method 2 success: parsed {len(result)} items")
-            return result
-        except json.JSONDecodeError as e:
-            print(f"⚠️ Method 2 failed: {e}")
-
-    # Method 3: More aggressive - extract anything between first [ and last ]
-    if start != -1 and end != -1:
-        json_str = text[start:end + 1]
-        # Remove all newlines and extra spaces
-        json_str = re.sub(r'\s+', ' ', json_str)
-        json_str = clean_json_string(json_str)
-
-        try:
-            result = json.loads(json_str)
-            print(f"✅ Method 3 success: parsed {len(result)} items")
-            return result
-        except json.JSONDecodeError as e:
-            print(f"❌ Method 3 failed: {e}")
-            print(f"📄 First 500 chars of JSON: {json_str[:500]}")
-            print(f"📄 Last 500 chars of JSON: {json_str[-500:]}")
-
-    # Method 4: Try parsing individual objects if array fails
-    print("🔄 Attempting Method 4: individual object extraction")
-    objects = []
-    obj_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
-    for match in re.finditer(obj_pattern, text):
-        try:
-            obj = json.loads(match.group())
-            if 'name' in obj:  # Looks like a profile
-                objects.append(obj)
-        except json.JSONDecodeError:
-            continue
-
-    if objects:
-        print(f"✅ Method 4 success: extracted {len(objects)} individual objects")
-        return objects
-
-    print("❌ All JSON extraction methods failed")
-    return None
 
 class JVMatcher:
-    """AI-powered JV partner matching system"""
-
-    def __init__(self, api_key=None):
-        """Initialize with OpenRouter API key"""
-        self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
-
-        if not self.api_key:
-            raise ValueError("OPENROUTER_API_KEY not set. Add it in Streamlit Secrets.")
-
-        # Use OpenRouter with OpenAI-compatible API
-        self.client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=self.api_key
-        )
-        # Use Amazon Nova 2 Lite (free) via OpenRouter - 1M context, works well
-        self.model = "amazon/nova-2-lite-v1:free"
+    """Core JV matching engine"""
     
-    def extract_profiles(self, transcript_content, chat_content):
-        """Extract participant profiles from transcript and chat using Claude"""
+    def __init__(self, output_dir: str = "outputs"):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(exist_ok=True)
         
-        print(f"📄 Extracting profiles from {len(transcript_content)} chars transcript, {len(chat_content)} chars chat...")
-        
-        prompt = f"""Analyze this JV Directory networking meeting and extract detailed profiles for ALL participants who shared meaningful information.
-
-TRANSCRIPT (what people said):
-{transcript_content[:50000]}
-
-CHAT LOG (contact info and offerings):
-{chat_content[:20000]}
-
-For each person who actively participated (introduced themselves, asked questions, shared their business), create a profile with these fields:
-
-1. name - Full name (required)
-2. business - Business/company name
-3. what_they_do - What service/product they offer (2-3 sentences)
-4. who_they_serve - Target market/ideal client
-5. offerings - List of specific things they're offering (affiliates, speaking, partnerships, services)
-6. seeking - List of what they need or are looking for
-7. contact_info - Email, phone, LinkedIn, website, Calendly (from chat)
-8. current_projects - Any launches, programs, or current initiatives mentioned
-9. pain_points - Challenges or problems they mentioned
-10. keywords - 5-10 relevant keywords for matching
-
-Return ONLY a JSON array of profile objects. No preamble, no explanation - just the JSON array.
-
-Example format:
-[
-  {{
-    "name": "Jane Smith",
-    "business": "Smith Coaching",
-    "what_they_do": "Executive coach helping C-suite leaders...",
-    "who_they_serve": "Fortune 500 executives and founders",
-    "offerings": ["Executive coaching packages", "Speaking at corporate events", "Leadership workshops"],
-    "seeking": ["Corporate partnership opportunities", "Speaking engagements", "Referral partners"],
-    "contact_info": "jane@smithcoaching.com, LinkedIn: jane-smith-coach",
-    "current_projects": "Launching new executive retreat program in Q1",
-    "pain_points": "Looking for better lead generation strategies",
-    "keywords": ["executive coaching", "leadership", "C-suite", "corporate training", "workshops"]
-  }}
-]
-
-Extract at least 20-30 profiles if that many people participated. Focus on people who shared substantial information."""
-
-        try:
-            print(f"🤖 Calling model: {self.model}")
-            response = self.client.chat.completions.create(
-                model=self.model,
-                max_tokens=8000,
-                messages=[{"role": "user", "content": prompt}]
-            )
-
-            content = response.choices[0].message.content
-            print(f"📝 Got response ({len(content)} chars)")
-
-            # Log the full response for debugging (first 1000 chars)
-            print(f"📄 Response preview: {content[:1000]}...")
-
-            # Extract JSON using robust parser
-            profiles = extract_json_array(content)
-
-            if profiles is None:
-                print("❌ No JSON array found in response")
-                print(f"📄 Full response was: {content[:2000]}")
-                return []
-
-            if len(profiles) == 0:
-                print("⚠️ JSON parsed but array was empty")
-                return []
-
-            print(f"✅ Extracted {len(profiles)} profiles")
-            # Log first profile as sample
-            if profiles:
-                print(f"📋 Sample profile: {json.dumps(profiles[0], indent=2)[:500]}")
-            return profiles
-
-        except json.JSONDecodeError as e:
-            print(f"❌ JSON parsing failed: {str(e)}")
-            print("The AI returned malformed JSON. Try again or use a different model.")
-            return []
-        except Exception as e:
-            print(f"❌ Error extracting profiles: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            raise
-    
-    def generate_matches(self, person_profile, all_profiles, num_matches=10):
-        """Generate top matches for one person using Claude"""
-        
-        person_name = person_profile.get('name', 'Unknown')
-        print(f"  🔍 Generating matches for {person_name}...")
-        
-        # Filter out the person themselves and get sample of others
-        others = [p for p in all_profiles if p.get('name') != person_name]
-        
-        if len(others) < 5:
-            print(f"    ⚠️  Only {len(others)} other participants - skipping")
-            return []
-        
-        # Limit to 50 profiles to stay within token limits
-        others_sample = others[:50]
-        
-        prompt = f"""You are an expert at identifying strategic JV partnerships. Find the TOP {num_matches} best partnership matches for this person.
-
-TARGET PERSON:
-{json.dumps(person_profile, indent=2)}
-
-POTENTIAL PARTNERS (find the best {num_matches} from these):
-{json.dumps(others_sample, indent=2)}
-
-For each of the top {num_matches} matches, provide:
-1. partner_name - Their full name
-2. score - Match quality score 0-100 (be realistic, use full range)
-3. match_type - Type of partnership (e.g., "Affiliate Partnership", "Speaking Opportunity", "Referral Exchange")
-4. why_good_fit - 2-3 specific sentences explaining why they're a good match
-5. collaboration_opportunity - Specific, actionable collaboration idea
-6. mutual_benefits - What each person gets from the partnership
-7. revenue_potential - Realistic revenue estimate or opportunity description
-8. urgency - Why they should connect soon (timing, current projects, etc.)
-9. first_outreach_message - Ready-to-send personalized message (100-150 words) that the target person can send
-10. contact_method - Their contact information
-
-IMPORTANT MATCHING CRITERIA:
-- Prioritize COMPLEMENTARY services (not competitors)
-- Match stated NEEDS with available OFFERINGS
-- Consider TARGET MARKET alignment
-- Look for CURRENT PROJECT synergies
-- Estimate realistic REVENUE potential
-- Only include matches with score >= 60
-
-Return ONLY a JSON array of the top {num_matches} matches, sorted by score (highest first). No preamble.
-
-[
-  {{
-    "partner_name": "...",
-    "score": 85,
-    "match_type": "...",
-    ...
-  }}
-]"""
-
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                max_tokens=8000,
-                messages=[{"role": "user", "content": prompt}]
-            )
-
-            content = response.choices[0].message.content
-            print(f"    📝 Got response ({len(content)} chars)")
-
-            # Extract JSON using robust parser
-            matches = extract_json_array(content)
-
-            if matches is None:
-                print(f"    ❌ No matches found for {person_name}")
-                return []
-
-            # Filter to only matches with score >= 60
-            matches = [m for m in matches if m.get('score', 0) >= 60]
-
-            print(f"    ✅ Found {len(matches)} quality matches")
-            return matches
-
-        except json.JSONDecodeError as e:
-            print(f"    ❌ JSON parsing failed for {person_name}: {str(e)}")
-            return []
-        except Exception as e:
-            print(f"    ❌ Error generating matches for {person_name}: {str(e)}")
-            return []
-    
-    def process_files(self, transcript_files, chat_files, num_matches=10):
+    def extract_profiles_from_transcript(self, transcript_path: str) -> List[Dict]:
         """
-        Process uploaded files and generate matches
-        
-        Args:
-            transcript_files: List of transcript file objects
-            chat_files: List of chat file objects
-            num_matches: Number of matches to generate per person
-            
-        Returns:
-            dict with profiles and matches
+        Extract individual profiles from a meeting transcript
+        Returns list of profiles with name, content, and metadata
         """
+        profiles = []
         
-        print("\n" + "="*70)
-        print("🚀 STARTING JV MATCHING PROCESS")
-        print("="*70)
-        
-        # Combine all transcripts
-        all_transcript_content = ""
-        for f in transcript_files:
-            content = f.read().decode('utf-8')
-            all_transcript_content += content + "\n\n"
-            print(f"📄 Read transcript: {f.name} ({len(content):,} chars)")
-        
-        # Combine all chats
-        all_chat_content = ""
-        for f in chat_files:
-            content = f.read().decode('utf-8')
-            all_chat_content += content + "\n\n"
-            print(f"💬 Read chat: {f.name} ({len(content):,} chars)")
-        
-        # Step 1: Extract profiles
-        print("\n" + "-"*70)
-        print("STEP 1: Extracting participant profiles...")
-        print("-"*70)
-        
-        profiles = self.extract_profiles(all_transcript_content, all_chat_content)
-        
-        if not profiles:
-            raise ValueError("No profiles extracted. Check your files contain participant information.")
-        
-        print(f"\n✅ Extracted {len(profiles)} profiles")
-        
-        # Step 2: Generate matches for each person
-        print("\n" + "-"*70)
-        print(f"STEP 2: Generating top {num_matches} matches for each person...")
-        print("-"*70)
-        
-        results = {}
-        
-        for i, person in enumerate(profiles, 1):
-            person_name = person.get('name', f'Person_{i}')
-            print(f"\n[{i}/{len(profiles)}] Processing {person_name}...")
+        try:
+            with open(transcript_path, 'r', encoding='utf-8') as f:
+                content = f.read()
             
-            matches = self.generate_matches(person, profiles, num_matches)
+            # Simple extraction: look for speaker patterns
+            # In real implementation, this would use NLP/AI to identify speakers
+            lines = content.split('\n')
+            current_speaker = None
+            current_text = []
             
-            results[person_name] = {
-                'profile': person,
-                'matches': matches,
-                'match_count': len(matches)
-            }
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Detect speaker changes (simple heuristic)
+                # Look for patterns like "Speaker 1:", "John:", etc.
+                speaker_match = re.match(r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*):\s*(.+)$', line)
+                if speaker_match:
+                    # Save previous speaker's content
+                    if current_speaker and current_text:
+                        profiles.append({
+                            'name': current_speaker,
+                            'content': ' '.join(current_text),
+                            'word_count': len(' '.join(current_text).split())
+                        })
+                    
+                    current_speaker = speaker_match.group(1)
+                    current_text = [speaker_match.group(2)]
+                else:
+                    if current_speaker:
+                        current_text.append(line)
+            
+            # Save last speaker
+            if current_speaker and current_text:
+                profiles.append({
+                    'name': current_speaker,
+                    'content': ' '.join(current_text),
+                    'word_count': len(' '.join(current_text).split())
+                })
+            
+            # If no speakers detected, treat entire transcript as one profile
+            if not profiles:
+                profiles.append({
+                    'name': 'Participant',
+                    'content': content,
+                    'word_count': len(content.split())
+                })
+            
+        except Exception as e:
+            raise Exception(f"Error extracting profiles: {str(e)}")
         
-        print("\n" + "="*70)
-        print("✅ MATCHING COMPLETE!")
-        print(f"   Profiles: {len(profiles)}")
-        print(f"   Total matches generated: {sum(r['match_count'] for r in results.values())}")
-        print("="*70 + "\n")
-        
-        return results
+        return profiles
     
-    def generate_report(self, person_name, person_data):
-        """Generate a formatted report for one person"""
+    def chunk_content(self, content: str, max_chunk_size: int = 8000) -> List[str]:
+        """
+        Split large content into manageable chunks
+        Tries to split at sentence boundaries
+        """
+        sentences = re.split(r'(?<=[.!?])\s+', content)
+        chunks = []
+        current_chunk = []
+        current_size = 0
         
-        profile = person_data['profile']
-        matches = person_data['matches']
+        for sentence in sentences:
+            sentence_size = len(sentence.split())
+            if current_size + sentence_size > max_chunk_size and current_chunk:
+                chunks.append(' '.join(current_chunk))
+                current_chunk = [sentence]
+                current_size = sentence_size
+            else:
+                current_chunk.append(sentence)
+                current_size += sentence_size
         
-        report = f"""# JV PARTNER MATCHING REPORT
-
-**Participant:** {person_name}
-**Generated:** {datetime.now().strftime("%B %d, %Y at %I:%M %p")}
-
----
-
-## YOUR PROFILE SUMMARY
-
-**What you do:** {profile.get('what_they_do', 'N/A')}
-
-**Who you serve:** {profile.get('who_they_serve', 'N/A')}
-
-**What you're offering:**
-"""
+        if current_chunk:
+            chunks.append(' '.join(current_chunk))
         
-        for offering in (profile.get('offerings') or []):
-            report += f"- {offering}\n"
-
-        report += "\n**What you're seeking:**\n"
-        for seeking in (profile.get('seeking') or []):
-            report += f"- {seeking}\n"
+        return chunks
+    
+    def generate_profile_summary(self, profile: Dict) -> Dict:
+        """
+        Generate a summary/profile for a person
+        In production, this would use AI/LLM
+        """
+        content = profile['content']
+        word_count = profile['word_count']
         
-        if profile.get('current_projects'):
-            report += f"\n**Current projects:** {profile.get('current_projects')}\n"
+        # Extract key topics (simple keyword extraction)
+        # In production, use NLP/AI for better extraction
+        keywords = self._extract_keywords(content)
         
-        report += f"\n---\n\n## YOUR TOP {len(matches)} JV PARTNER MATCHES\n\n"
+        return {
+            'name': profile['name'],
+            'word_count': word_count,
+            'keywords': keywords[:10],  # Top 10 keywords
+            'summary': content[:500] + '...' if len(content) > 500 else content
+        }
+    
+    def _extract_keywords(self, text: str) -> List[str]:
+        """Simple keyword extraction - in production, use proper NLP"""
+        # Remove common words
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them'}
+        
+        words = re.findall(r'\b[a-z]{4,}\b', text.lower())
+        word_freq = {}
+        for word in words:
+            if word not in stop_words:
+                word_freq[word] = word_freq.get(word, 0) + 1
+        
+        # Return top keywords by frequency
+        sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
+        return [word for word, freq in sorted_words]
+    
+    def find_matches(self, target_profile: Dict, all_profiles: List[Dict], top_n: int = 10) -> List[Dict]:
+        """
+        Find best JV partner matches for a target profile
+        Returns list of matched profiles with match scores and reasons
+        """
+        matches = []
+        target_keywords = set(target_profile.get('keywords', []))
+        
+        for profile in all_profiles:
+            if profile['name'] == target_profile['name']:
+                continue  # Skip self
+            
+            profile_keywords = set(profile.get('keywords', []))
+            
+            # Calculate similarity score (simple keyword overlap)
+            # In production, use semantic similarity (embeddings, etc.)
+            common_keywords = target_keywords.intersection(profile_keywords)
+            similarity_score = len(common_keywords) / max(len(target_keywords), 1)
+            
+            matches.append({
+                'profile': profile,
+                'score': similarity_score,
+                'common_keywords': list(common_keywords)[:5],
+                'match_reason': self._generate_match_reason(target_profile, profile, common_keywords)
+            })
+        
+        # Sort by score and return top N
+        matches.sort(key=lambda x: x['score'], reverse=True)
+        return matches[:top_n]
+    
+    def _generate_match_reason(self, target: Dict, match: Dict, common_keywords: set) -> str:
+        """Generate a human-readable reason for the match"""
+        if not common_keywords:
+            return f"{match['name']} shares complementary interests that could create valuable synergies."
+        
+        keyword_list = ', '.join(list(common_keywords)[:3])
+        return f"{match['name']} shares interests in {keyword_list}, making them an ideal JV partner for collaborative opportunities."
+    
+    def generate_report(self, profile: Dict, matches: List[Dict], output_path: str):
+        """
+        Generate a personalized report for a profile
+        """
+        report_lines = [
+            f"# JV Partner Matching Report for {profile['name']}",
+            f"\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"\n## Your Profile Summary",
+            f"\n**Name:** {profile['name']}",
+            f"**Content Length:** {profile['word_count']:,} words",
+            f"**Key Interests:** {', '.join(profile.get('keywords', [])[:10])}",
+            f"\n## Top {len(matches)} Recommended JV Partners\n",
+        ]
         
         for i, match in enumerate(matches, 1):
-            report += f"""
-### MATCH #{i}: {match.get('partner_name', 'Unknown')} 
-**Score:** {match.get('score', 0)}/100 | **Type:** {match.get('match_type', 'Partnership')}
-
-**WHY THIS IS A GOOD FIT:**
-{match.get('why_good_fit', 'N/A')}
-
-**COLLABORATION OPPORTUNITY:**
-{match.get('collaboration_opportunity', 'N/A')}
-
-**MUTUAL BENEFITS:**
-{match.get('mutual_benefits', 'N/A')}
-
-**REVENUE POTENTIAL:**
-{match.get('revenue_potential', 'N/A')}
-
-**WHY CONNECT NOW:**
-{match.get('urgency', 'N/A')}
-
-**READY-TO-SEND OUTREACH MESSAGE:**
-```
-{match.get('first_outreach_message', 'N/A')}
-```
-
-**CONTACT:** {match.get('contact_method', 'N/A')}
-
----
-"""
+            match_profile = match['profile']
+            report_lines.extend([
+                f"### {i}. {match_profile['name']}",
+                f"\n**Match Score:** {match['score']:.1%}",
+                f"\n**Why This Match:** {match['match_reason']}",
+                f"\n**Shared Interests:** {', '.join(match.get('common_keywords', [])) if match.get('common_keywords') else 'Complementary skills'}",
+                f"\n**Profile Summary:** {match_profile.get('summary', match_profile['content'][:300])}...",
+                "\n---\n"
+            ])
         
-        report += """
-## NEXT STEPS
-
-1. Review each recommended partner above
-2. Reach out to those with highest match scores first
-3. Use the ready-to-send messages (personalize as needed)
-4. Mention specific collaboration opportunities when connecting
-5. Follow up within 48 hours for best results
-
----
-
-*Generated by JV Matcher - AI-Powered Partnership Matching*
-"""
+        report_lines.append("\n## Next Steps\n")
+        report_lines.append("1. Review each recommended partner above")
+        report_lines.append("2. Reach out to those with highest match scores")
+        report_lines.append("3. Mention shared interests when connecting")
+        report_lines.append("4. Explore collaborative opportunities together\n")
         
-        return report
+        report_content = '\n'.join(report_lines)
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(report_content)
+        
+        return output_path
+    
+    def process_files(self, transcript_files: List[str], matches_per_person: int = 10) -> Dict:
+        """
+        Process multiple transcript files and generate matching reports
+        Returns statistics and output file paths
+        """
+        all_profiles = []
+        file_profiles_map = {}
+        
+        # Extract profiles from all files
+        for transcript_file in transcript_files:
+            profiles = self.extract_profiles_from_transcript(transcript_file)
+            all_profiles.extend(profiles)
+            file_profiles_map[transcript_file] = profiles
+        
+        # Generate summaries for all profiles
+        profile_summaries = []
+        for profile in all_profiles:
+            summary = self.generate_profile_summary(profile)
+            profile_summaries.append(summary)
+        
+        # Generate reports for each profile
+        reports_generated = []
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        reports_dir = self.output_dir / f"reports_{timestamp}"
+        reports_dir.mkdir(exist_ok=True)
+        
+        for profile_summary in profile_summaries:
+            matches = self.find_matches(profile_summary, profile_summaries, top_n=matches_per_person)
+            
+            # Generate report
+            safe_name = re.sub(r'[^\w\s-]', '', profile_summary['name']).strip().replace(' ', '_')
+            report_path = reports_dir / f"{safe_name}_JV_Report.md"
+            
+            self.generate_report(profile_summary, matches, str(report_path))
+            reports_generated.append(str(report_path))
+        
+        # Create ZIP file
+        zip_path = self.output_dir / f"JV_Reports_{timestamp}.zip"
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for report_path in reports_generated:
+                zipf.write(report_path, os.path.basename(report_path))
+        
+        return {
+            'total_profiles': len(profile_summaries),
+            'total_reports': len(reports_generated),
+            'reports_dir': str(reports_dir),
+            'zip_path': str(zip_path),
+            'reports': reports_generated
+        }
+
+
+
+

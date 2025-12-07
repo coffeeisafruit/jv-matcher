@@ -1,6 +1,18 @@
-openai
-streamlit
-pandas
-reportlab
-Pillow
-python-dateutil
+# JV Directory & Transcriber - Python Dependencies
+
+# Web Framework
+streamlit>=1.28.0
+
+# Database (Supabase)
+supabase>=2.0.0
+
+# Environment Variables
+python-dotenv>=1.0.0
+
+# Data Processing
+pandas>=2.0.0
+
+# Transcription (existing)
+openai-whisper
+torch
+torchaudio

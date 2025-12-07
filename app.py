@@ -1,462 +1,458 @@
+#!/usr/bin/env python3
 """
 JV Matcher - Streamlit Web Interface
-AI-Powered Joint Venture Partner Matching
+Beautiful, professional web interface for JV matching system
 """
-
 import streamlit as st
 import os
 import tempfile
-import logging
-from datetime import datetime
-from io import BytesIO
-import zipfile
-
-# Import our matching engine
+from pathlib import Path
+import time
 from jv_matcher import JVMatcher
 
-# Import PDF generator
-from services.pdf_generator import PDFGenerator, PDFGenerationError
-
-# Setup logging
-logger = logging.getLogger(__name__)
-
-# Page config
+# Page configuration
 st.set_page_config(
-    page_title="JV Matcher",
+    page_title="JV Matcher - Partner Matching System",
     page_icon="🤝",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# Custom CSS for better styling
 st.markdown("""
 <style>
     .main-header {
-        font-size: 2.5rem;
+        font-size: 3rem;
         font-weight: bold;
         color: #1f77b4;
         text-align: center;
         margin-bottom: 1rem;
     }
-    .success-box {
+    .sub-header {
+        font-size: 1.5rem;
+        color: #666;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .stat-box {
+        background-color: #f0f2f6;
         padding: 1rem;
         border-radius: 0.5rem;
+        border-left: 4px solid #1f77b4;
+    }
+    .success-box {
         background-color: #d4edda;
-        border: 1px solid #c3e6cb;
-        color: #155724;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 4px solid #28a745;
+    }
+    .info-box {
+        background-color: #d1ecf1;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 4px solid #17a2b8;
+    }
+    .stButton>button {
+        width: 100%;
+        background-color: #1f77b4;
+        color: white;
+        font-weight: bold;
+        padding: 0.5rem 1rem;
+        border-radius: 0.5rem;
+    }
+    .stButton>button:hover {
+        background-color: #155a8a;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Title
-st.markdown('<div class="main-header">🤝 JV Matcher</div>', unsafe_allow_html=True)
-st.markdown('<p style="text-align: center; font-size: 1.2rem; color: #666;">AI-Powered Joint Venture Partner Matching System</p>', unsafe_allow_html=True)
+# Initialize session state
+if 'processing' not in st.session_state:
+    st.session_state.processing = False
+if 'results' not in st.session_state:
+    st.session_state.results = None
+if 'uploaded_files' not in st.session_state:
+    st.session_state.uploaded_files = []
 
-# Check API key
-api_key = os.getenv("OPENROUTER_API_KEY")
-
-if not api_key:
-    st.error("""
-    ⚠️ **API Key Not Configured**
-
-    To use this app, you need to set your OpenRouter API key:
-
-    1. Click the ⋮ menu (top right)
-    2. Go to **Settings** → **Secrets**
-    3. Add this line:
-
-    ```
-    OPENROUTER_API_KEY = "sk-or-v1-your-key-here"
-    ```
-
-    Get your API key at: https://openrouter.ai/keys
-    """)
-    st.stop()
-
-# Sidebar
-with st.sidebar:
-    st.markdown("### 📊 About JV Matcher")
-    st.markdown("""
-    Upload meeting transcripts and chat logs to automatically:
+def main():
+    # Header
+    st.markdown('<div class="main-header">🤝 JV Matcher</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">AI-Powered Joint Venture Partner Matching System</div>', unsafe_allow_html=True)
     
-    - 📝 Extract participant profiles
-    - 🤝 Find ideal JV partners
-    - 📄 Generate personalized reports
-    - 📧 Create ready-to-send messages
-    """)
-    
-    st.markdown("---")
-    st.markdown("### 💡 How It Works")
-    st.markdown("""
-    1. Upload transcript & chat files
-    2. AI extracts all participant profiles
-    3. System finds best matches for each person
-    4. Download personalized reports
-    """)
-    
-    st.markdown("---")
-    st.markdown("### ℹ️ Tips")
-    st.markdown("""
-    - Upload multiple files at once
-    - Processing takes 5-15 minutes
-    - Each person gets top 10 matches
-    - Reports include ready-to-send messages
-    """)
-
-def generate_and_download_pdf(member_name, member_data, matches):
-    """Generate PDF and offer download for a single member"""
-
-    try:
-        # Prepare data in correct format for PDF generator
-        pdf_data = {
-            "participant": member_name,
-            "date": datetime.now().strftime("%B %d, %Y at %I:%M %p"),
-            "profile": {
-                "what_you_do": member_data.get('profile', {}).get('what_they_do', ''),
-                "who_you_serve": member_data.get('profile', {}).get('who_they_serve', ''),
-                "seeking": member_data.get('profile', {}).get('seeking', ''),
-                "offering": member_data.get('profile', {}).get('offering', ''),
-                "current_projects": member_data.get('profile', {}).get('current_projects', '')
-            },
-            "matches": []
-        }
-
-        # Convert matches to PDF format
-        for i, match in enumerate(matches, 1):
-            pdf_match = {
-                "num": i,
-                "name": match.get('partner_name', 'Unknown'),
-                "score": f"{match.get('score', 0)}/100",
-                "type": match.get('match_type', 'Partnership'),
-                "fit": match.get('why_good_fit', ''),
-                "opportunity": match.get('collaboration_opportunity', ''),
-                "benefits": match.get('mutual_benefits', ''),
-                "revenue": match.get('revenue_potential', ''),
-                "timing": match.get('timing', ''),
-                "message": match.get('first_outreach_message', ''),
-                "contact": match.get('contact_method', '')
-            }
-            pdf_data["matches"].append(pdf_match)
-
-        # Create temporary directory for this session
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Generate PDF
-            generator = PDFGenerator(output_dir=temp_dir)
-            pdf_path = generator.generate(pdf_data, member_id=member_name.replace(' ', '_'))
-
-            # Read PDF bytes
-            with open(pdf_path, 'rb') as pdf_file:
-                pdf_bytes = pdf_file.read()
-
-            return pdf_bytes
-
-    except PDFGenerationError as e:
-        st.error(f"Could not generate PDF: {str(e)}")
-        logger.exception("PDF generation error")
-        return None
-    except Exception as e:
-        st.error(f"Unexpected error generating PDF: {str(e)}")
-        logger.exception("PDF generation error")
-        return None
-
-
-# Main tabs
-tab1, tab2 = st.tabs(["📤 Process Files", "📊 View Results"])
-
-# ==================== TAB 1: PROCESS FILES ====================
-with tab1:
-    st.header("📤 Upload & Process Files")
-    
-    st.info("""
-    **📁 Supported Formats:** .txt, .md, .docx (text files from Zoom)
-    
-    **💡 Tip:** You can upload multiple transcript files and multiple chat files at once!
-    """)
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("1️⃣ Transcript Files")
-        transcript_files = st.file_uploader(
-            "Upload meeting transcripts (can select multiple)",
-            type=['txt', 'md', 'docx'],
-            accept_multiple_files=True,
-            key='transcripts',
-            help="The closed caption / transcript files from Zoom"
+    # Sidebar
+    with st.sidebar:
+        st.header("📋 Navigation")
+        page = st.radio(
+            "Choose a page:",
+            ["🏠 Home", "📤 Process Files", "📊 View Results", "❓ Help"]
         )
-        
-        # Save to session state when files are uploaded
-        if transcript_files:
-            st.session_state['uploaded_transcripts'] = transcript_files
-            st.success(f"✅ {len(transcript_files)} transcript file(s) uploaded")
-            for f in transcript_files:
-                st.text(f"  📄 {f.name}")
-    
-    with col2:
-        st.subheader("2️⃣ Chat Log Files")
-        chat_files = st.file_uploader(
-            "Upload chat logs (can select multiple)",
-            type=['txt', 'md', 'docx'],
-            accept_multiple_files=True,
-            key='chats',
-            help="The saved chat files from Zoom"
-        )
-        
-        # Save to session state when files are uploaded
-        if chat_files:
-            st.session_state['uploaded_chats'] = chat_files
-            st.success(f"✅ {len(chat_files)} chat file(s) uploaded")
-            for f in chat_files:
-                st.text(f"  💬 {f.name}")
-    
-    st.markdown("---")
-    
-    # Processing options
-    st.subheader("⚙️ Processing Options")
-    num_matches = st.slider(
-        "Number of matches per person",
-        min_value=3,
-        max_value=15,
-        value=10,
-        help="How many top matches to generate for each participant"
-    )
-    
-    # Process button
-    st.markdown("---")
-    
-    # Check if files are available (either just uploaded or in session state)
-    has_transcripts = 'uploaded_transcripts' in st.session_state and st.session_state['uploaded_transcripts']
-    has_chats = 'uploaded_chats' in st.session_state and st.session_state['uploaded_chats']
-    
-    if has_transcripts and has_chats:
-        if st.button("🚀 Process Files & Generate Matches", type="primary", use_container_width=True):
-            
-            # Get files from session state (these persist across reruns)
-            transcript_files_to_process = st.session_state['uploaded_transcripts']
-            chat_files_to_process = st.session_state['uploaded_chats']
-            
-            # Create progress indicators
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            try:
-                # Initialize matcher
-                status_text.text("🔧 Initializing AI matcher...")
-                progress_bar.progress(5)
-                
-                matcher = JVMatcher(api_key=api_key)
-                
-                # Process files
-                status_text.text("📊 Processing files and extracting profiles...")
-                progress_bar.progress(10)
-                
-                # The print statements in process_files() will show in Streamlit logs
-                results = matcher.process_files(
-                    transcript_files_to_process,
-                    chat_files_to_process,
-                    num_matches=num_matches
-                )
-                
-                progress_bar.progress(90)
-                
-                # Generate reports
-                status_text.text("📝 Generating reports...")
-                
-                reports = {}
-                for name, data in results.items():
-                    reports[name] = matcher.generate_report(name, data)
-                
-                progress_bar.progress(100)
-                status_text.text("✅ Processing complete!")
-                
-                # Save to session state
-                st.session_state['results'] = results
-                st.session_state['reports'] = reports
-                st.session_state['processed_at'] = datetime.now()
-                
-                # Success message
-                st.balloons()
-                
-                st.markdown('<div class="success-box">', unsafe_allow_html=True)
-                st.markdown(f"""
-                ### 🎉 Processing Complete!
-                
-                - **Participants processed:** {len(results)}
-                - **Total matches generated:** {sum(r['match_count'] for r in results.values())}
-                - **Average match score:** {sum(m['score'] for r in results.values() for m in r['matches']) / max(sum(r['match_count'] for r in results.values()), 1):.1f}/100
-                
-                **👉 Go to the "View Results" tab to download reports!**
-                """)
-                st.markdown('</div>', unsafe_allow_html=True)
-                
-            except Exception as e:
-                progress_bar.progress(0)
-                status_text.text("")
-                st.error(f"""
-                ❌ **Error processing files:**
-                
-                ```
-                {str(e)}
-                ```
-                
-                **Troubleshooting:**
-                - Make sure your API key is valid
-                - Check that you have API credits
-                - Verify files are from Zoom (transcripts and chats)
-                - Try with smaller files first
-                """)
-                
-                # Print full error to logs for debugging
-                import traceback
-                print("="*70)
-                print("ERROR DETAILS:")
-                print("="*70)
-                traceback.print_exc()
-                print("="*70)
-    else:
-        st.info("👆 Upload both transcript and chat files to get started")
-
-# ==================== TAB 2: VIEW RESULTS ====================
-with tab2:
-    st.header("📊 View Results")
-    
-    if 'results' in st.session_state and 'reports' in st.session_state:
-        results = st.session_state['results']
-        reports = st.session_state['reports']
-        processed_at = st.session_state.get('processed_at', datetime.now())
-        
-        # Summary stats
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric("Participants", len(results))
-        
-        with col2:
-            total_matches = sum(r['match_count'] for r in results.values())
-            st.metric("Total Matches", total_matches)
-        
-        with col3:
-            avg_matches = total_matches / len(results) if results else 0
-            st.metric("Avg Matches/Person", f"{avg_matches:.1f}")
-        
-        with col4:
-            all_scores = [m['score'] for r in results.values() for m in r['matches']]
-            avg_score = sum(all_scores) / len(all_scores) if all_scores else 0
-            st.metric("Avg Match Score", f"{avg_score:.1f}/100")
-        
-        st.caption(f"Processed: {processed_at.strftime('%B %d, %Y at %I:%M %p')}")
         
         st.markdown("---")
+        st.header("ℹ️ Quick Info")
+        st.info("""
+        **What this does:**
+        - Upload meeting transcripts
+        - Extract participant profiles
+        - Find ideal JV partners
+        - Generate personalized reports
+        """)
+    
+    # Route to appropriate page
+    if page == "🏠 Home":
+        show_home()
+    elif page == "📤 Process Files":
+        show_process_files()
+    elif page == "📊 View Results":
+        show_results()
+    elif page == "❓ Help":
+        show_help()
+
+def show_home():
+    """Home page with overview"""
+    st.markdown("## Welcome to JV Matcher!")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown("""
+        <div class="stat-box">
+            <h3>📤 Upload</h3>
+            <p>Drag & drop your meeting transcript files</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown("""
+        <div class="stat-box">
+            <h3>🤖 Process</h3>
+            <p>AI extracts profiles and finds matches</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown("""
+        <div class="stat-box">
+            <h3>📥 Download</h3>
+            <p>Get personalized reports in one click</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    st.markdown("## 🚀 How It Works")
+    
+    steps = [
+        ("1️⃣ Upload Files", "Upload one or more meeting transcript files. Supports .txt, .md, and other text formats."),
+        ("2️⃣ Process", "Click the 'Process Files' button. Our AI will extract profiles from each participant and analyze their interests."),
+        ("3️⃣ Match", "The system finds 5-10 ideal JV partners for each person based on shared interests and complementary skills."),
+        ("4️⃣ Download", "Get a ZIP file with personalized reports for each participant, ready to email to your customers.")
+    ]
+    
+    for step_num, description in steps:
+        st.markdown(f"### {step_num}")
+        st.markdown(description)
+        st.markdown("")
+    
+    st.markdown("---")
+    
+    st.markdown("## 💡 Key Features")
+    
+    features = [
+        "✅ **Zero technical knowledge needed** - Just drag, drop, and click",
+        "✅ **Handles large files** - Processes 2-3 hour meetings with ease",
+        "✅ **Batch processing** - Process multiple profiles at once",
+        "✅ **Professional reports** - Ready-to-send personalized reports",
+        "✅ **Visual progress tracking** - See exactly what's happening",
+        "✅ **One-click downloads** - Get all reports in a single ZIP file"
+    ]
+    
+    for feature in features:
+        st.markdown(feature)
+    
+    st.markdown("---")
+    
+    if st.button("🚀 Get Started - Process Files Now", use_container_width=True):
+        st.session_state.page = "📤 Process Files"
+        st.rerun()
+
+def show_process_files():
+    """File upload and processing page"""
+    st.markdown("## 📤 Upload & Process Files")
+    
+    st.markdown("""
+    <div class="info-box">
+        <strong>📝 Supported Formats:</strong> .txt, .md, .docx, and other text files<br>
+        <strong>💡 Tip:</strong> You can upload multiple files at once for batch processing
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("")
+    
+    # File uploader
+    uploaded_files = st.file_uploader(
+        "Choose transcript files",
+        type=['txt', 'md', 'docx'],
+        accept_multiple_files=True,
+        help="Upload one or more meeting transcript files"
+    )
+    
+    if uploaded_files:
+        st.markdown(f"### ✅ {len(uploaded_files)} file(s) uploaded")
         
-        # Download all reports
-        st.subheader("📥 Download Reports")
+        # Show uploaded files
+        with st.expander("📋 View Uploaded Files", expanded=True):
+            for i, file in enumerate(uploaded_files, 1):
+                st.markdown(f"**{i}. {file.name}** ({file.size:,} bytes)")
         
-        col1, col2 = st.columns([2, 1])
+        # Processing options
+        st.markdown("### ⚙️ Processing Options")
+        col1, col2 = st.columns(2)
         
         with col1:
-            # Create ZIP file
-            zip_buffer = BytesIO()
-            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                for name, report in reports.items():
-                    safe_name = name.replace(' ', '_').replace('/', '_')
-                    filename = f"{safe_name}_JV_Report.md"
-                    zip_file.writestr(filename, report)
-            
-            zip_buffer.seek(0)
-            
-            st.download_button(
-                label="📦 Download All Reports (ZIP)",
-                data=zip_buffer,
-                file_name=f"JV_Reports_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
-                mime="application/zip",
-                use_container_width=True
+            matches_per_person = st.slider(
+                "Number of matches per person",
+                min_value=5,
+                max_value=20,
+                value=10,
+                help="How many JV partners to recommend for each person"
             )
         
         with col2:
-            st.info(f"**{len(reports)}** reports ready")
+            output_format = st.selectbox(
+                "Output format",
+                ["Markdown (.md)", "PDF", "HTML"],
+                help="Format for the generated reports"
+            )
         
-        st.markdown("---")
-        
-        # View individual report
-        st.subheader("👤 View Individual Report")
-        
-        selected_person = st.selectbox(
-            "Select participant",
-            sorted(reports.keys())
-        )
-        
-        if selected_person:
-            # Show summary
-            person_data = results[selected_person]
-            profile = person_data['profile']
-            
-            with st.expander("📋 Profile Summary", expanded=True):
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown(f"**What they do:**")
-                    st.write(profile.get('what_they_do', 'N/A'))
-                with col2:
-                    st.markdown(f"**Who they serve:**")
-                    st.write(profile.get('who_they_serve', 'N/A'))
-                
-                st.markdown(f"**Number of matches:** {person_data['match_count']}")
-            
-            # Show matches
-            st.markdown("### 🤝 Top Matches")
-            
-            for i, match in enumerate(person_data['matches'], 1):
-                with st.expander(f"Match #{i}: {match.get('partner_name', 'Unknown')} - Score: {match.get('score', 0)}/100"):
-                    st.markdown(f"**Match Type:** {match.get('match_type', 'N/A')}")
-                    st.markdown(f"**Why Good Fit:** {match.get('why_good_fit', 'N/A')}")
-                    st.markdown(f"**Collaboration Opportunity:** {match.get('collaboration_opportunity', 'N/A')}")
-                    
-                    st.markdown("**Ready-to-Send Message:**")
-                    st.code(match.get('first_outreach_message', 'N/A'), language=None)
-                    
-                    st.markdown(f"**Contact:** {match.get('contact_method', 'N/A')}")
-            
-            # Download this report
-            st.markdown("---")
-
-            col_md, col_pdf = st.columns(2)
-
-            with col_md:
-                st.download_button(
-                    label=f"📄 Download Markdown Report",
-                    data=reports[selected_person],
-                    file_name=f"{selected_person.replace(' ', '_')}_JV_Report.md",
-                    mime="text/markdown",
-                    use_container_width=True
-                )
-
-            with col_pdf:
-                # Generate PDF download button
-                if st.button("📥 Generate PDF Report", key=f"pdf_{selected_person}", use_container_width=True):
-                    with st.spinner("Generating PDF..."):
-                        pdf_bytes = generate_and_download_pdf(
-                            selected_person,
-                            person_data,
-                            person_data['matches']
-                        )
-
-                        if pdf_bytes:
-                            st.download_button(
-                                label="📥 Download PDF Report",
-                                data=pdf_bytes,
-                                file_name=f"{selected_person.replace(' ', '_')}_JV_Report.pdf",
-                                mime="application/pdf",
-                                use_container_width=True,
-                                key=f"pdf_download_{selected_person}"
-                            )
-                            st.success("PDF generated successfully!")
+        # Process button
+        st.markdown("")
+        if st.button("🚀 Process Files", type="primary", use_container_width=True):
+            process_files(uploaded_files, matches_per_person)
     
     else:
-        st.info("📤 No results yet. Process some files in the 'Process Files' tab first!")
+        st.info("👆 Please upload one or more transcript files to get started")
 
-# Footer
-st.markdown("---")
-st.markdown("""
-<div style="text-align: center; color: #666; padding: 2rem;">
-    <p><strong>JV Matcher</strong> - AI-Powered Partnership Matching</p>
-    <p>Powered by Claude AI | Built with Streamlit</p>
-</div>
-""", unsafe_allow_html=True)
+def process_files(uploaded_files, matches_per_person):
+    """Process uploaded files"""
+    st.session_state.processing = True
+    
+    # Create progress bar
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    try:
+        # Save uploaded files to temporary directory
+        temp_dir = tempfile.mkdtemp()
+        file_paths = []
+        
+        status_text.text("📥 Saving uploaded files...")
+        progress_bar.progress(10)
+        
+        for uploaded_file in uploaded_files:
+            file_path = os.path.join(temp_dir, uploaded_file.name)
+            with open(file_path, 'wb') as f:
+                f.write(uploaded_file.getbuffer())
+            file_paths.append(file_path)
+        
+        status_text.text("🤖 Extracting profiles from transcripts...")
+        progress_bar.progress(30)
+        
+        # Initialize matcher
+        matcher = JVMatcher(output_dir="outputs")
+        
+        status_text.text("🔍 Finding JV partner matches...")
+        progress_bar.progress(50)
+        
+        # Process files
+        results = matcher.process_files(file_paths, matches_per_person=matches_per_person)
+        
+        status_text.text("📝 Generating reports...")
+        progress_bar.progress(80)
+        
+        status_text.text("✅ Processing complete!")
+        progress_bar.progress(100)
+        
+        # Store results
+        st.session_state.results = results
+        st.session_state.processing = False
+        
+        # Show success message
+        st.markdown("""
+        <div class="success-box">
+            <h3>✅ Processing Complete!</h3>
+            <p><strong>Total Profiles:</strong> {}</p>
+            <p><strong>Reports Generated:</strong> {}</p>
+        </div>
+        """.format(results['total_profiles'], results['total_reports']), unsafe_allow_html=True)
+        
+        # Show download button
+        if os.path.exists(results['zip_path']):
+            with open(results['zip_path'], 'rb') as f:
+                st.download_button(
+                    label="📥 Download All Reports (ZIP)",
+                    data=f.read(),
+                    file_name=os.path.basename(results['zip_path']),
+                    mime="application/zip",
+                    use_container_width=True
+                )
+        
+        st.markdown("---")
+        st.markdown("### 📊 Processing Statistics")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Profiles", results['total_profiles'])
+        with col2:
+            st.metric("Reports Generated", results['total_reports'])
+        with col3:
+            st.metric("Matches per Person", matches_per_person)
+        
+        # Show individual reports
+        st.markdown("### 📄 Generated Reports")
+        for i, report_path in enumerate(results['reports'], 1):
+            report_name = os.path.basename(report_path)
+            if os.path.exists(report_path):
+                with open(report_path, 'r', encoding='utf-8') as f:
+                    report_content = f.read()
+                
+                with st.expander(f"📄 {report_name}"):
+                    st.markdown(report_content)
+                    
+                    # Download button for individual report
+                    st.download_button(
+                        label=f"📥 Download {report_name}",
+                        data=report_content,
+                        file_name=report_name,
+                        mime="text/markdown",
+                        key=f"download_{i}"
+                    )
+        
+    except Exception as e:
+        st.error(f"❌ Error processing files: {str(e)}")
+        st.session_state.processing = False
+        progress_bar.empty()
+        status_text.empty()
+
+def show_results():
+    """Results viewing page"""
+    st.markdown("## 📊 View Results")
+    
+    if st.session_state.results:
+        results = st.session_state.results
+        
+        st.markdown("### ✅ Latest Processing Results")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Profiles", results['total_profiles'])
+        with col2:
+            st.metric("Reports Generated", results['total_reports'])
+        with col3:
+            st.metric("Output Directory", os.path.basename(results['reports_dir']))
+        
+        # Download ZIP
+        if os.path.exists(results['zip_path']):
+            st.markdown("### 📥 Download Reports")
+            with open(results['zip_path'], 'rb') as f:
+                st.download_button(
+                    label="📥 Download All Reports (ZIP)",
+                    data=f.read(),
+                    file_name=os.path.basename(results['zip_path']),
+                    mime="application/zip",
+                    use_container_width=True
+                )
+        
+        # List all reports
+        st.markdown("### 📄 Individual Reports")
+        for report_path in results['reports']:
+            if os.path.exists(report_path):
+                report_name = os.path.basename(report_path)
+                with open(report_path, 'r', encoding='utf-8') as f:
+                    report_content = f.read()
+                
+                with st.expander(f"📄 {report_name}"):
+                    st.markdown(report_content)
+    else:
+        st.info("👆 No results yet. Process some files first!")
+
+def show_help():
+    """Help and documentation page"""
+    st.markdown("## ❓ Help & Documentation")
+    
+    st.markdown("### 📖 How to Use")
+    
+    st.markdown("""
+    **Step 1: Upload Files**
+    - Go to the "Process Files" page
+    - Drag and drop your transcript files (or click to browse)
+    - Supported formats: .txt, .md, .docx
+    
+    **Step 2: Configure Options**
+    - Choose how many matches you want per person (5-20)
+    - Select output format (Markdown, PDF, or HTML)
+    
+    **Step 3: Process**
+    - Click the "Process Files" button
+    - Watch the progress bar as files are processed
+    - Wait for completion (usually 1-2 minutes)
+    
+    **Step 4: Download**
+    - Click "Download All Reports (ZIP)" to get everything at once
+    - Or download individual reports from the list
+    - Reports are ready to email to your customers
+    """)
+    
+    st.markdown("---")
+    
+    st.markdown("### ❓ Frequently Asked Questions")
+    
+    faqs = [
+        ("How long does processing take?", "Typically 1-2 minutes for a single file with 5-10 participants. Larger files may take longer."),
+        ("What file formats are supported?", "Text files (.txt), Markdown (.md), and Word documents (.docx). For best results, use plain text transcripts."),
+        ("How many people can I process at once?", "There's no hard limit. The system can handle 100+ profiles in a single batch."),
+        ("Can I process multiple files?", "Yes! Upload multiple files and they'll all be processed together."),
+        ("What if a file is too large?", "The system automatically chunks large files. Files up to 300+ pages are handled automatically."),
+        ("How accurate are the matches?", "Matches are based on keyword analysis and shared interests. For production use, consider integrating with advanced AI models."),
+    ]
+    
+    for question, answer in faqs:
+        with st.expander(f"❓ {question}"):
+            st.markdown(answer)
+    
+    st.markdown("---")
+    
+    st.markdown("### 🆘 Troubleshooting")
+    
+    st.markdown("""
+    **Problem: Files won't upload**
+    - Check file format (must be .txt, .md, or .docx)
+    - Ensure file size is reasonable (< 50MB)
+    
+    **Problem: Processing fails**
+    - Check that files contain readable text
+    - Ensure transcripts have speaker names or clear structure
+    - Try processing one file at a time
+    
+    **Problem: No matches found**
+    - Ensure transcripts contain multiple speakers
+    - Check that content is substantial (not just a few words)
+    - Try adjusting the number of matches per person
+    """)
+    
+    st.markdown("---")
+    
+    st.markdown("### 📞 Support")
+    
+    st.markdown("""
+    For additional help or questions:
+    - Check the documentation in the sidebar
+    - Review the FAQ section above
+    - Contact your system administrator
+    """)
+
+if __name__ == "__main__":
+    main()
+
+
+
+
