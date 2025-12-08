@@ -910,7 +910,7 @@ def show_matches():
 
                 # Action buttons
                 st.markdown("---")
-                col1, col2, col3 = st.columns(3)
+                col1, col2, col3, col4 = st.columns(4)
 
                 with col1:
                     if status == 'pending':
@@ -923,15 +923,23 @@ def show_matches():
                             st.rerun()
                     elif status == 'contacted':
                         st.success("Contacted")
+                    elif status == 'connected':
+                        st.success("Connected")
 
                 with col2:
-                    if st.button("Connect", key=f"connect_{match['id']}"):
-                        directory_service.add_connection(user_profile['id'], suggested['id'])
-                        directory_service.update_match_status(match['id'], 'connected')
-                        st.success("Connected!")
-                        st.rerun()
+                    if status != 'connected':
+                        if st.button("Connect", key=f"connect_{match['id']}"):
+                            directory_service.add_connection(user_profile['id'], suggested['id'])
+                            directory_service.update_match_status(match['id'], 'connected')
+                            st.rerun()
 
                 with col3:
+                    if status not in ['dismissed', 'pending']:
+                        if st.button("Reset", key=f"reset_{match['id']}", help="Reset to pending status"):
+                            directory_service.update_match_status(match['id'], 'pending')
+                            st.rerun()
+
+                with col4:
                     if status not in ['dismissed', 'connected']:
                         if st.button("Dismiss", key=f"dismiss_{match['id']}", type="secondary"):
                             directory_service.dismiss_match(user_profile['id'], suggested['id'])
