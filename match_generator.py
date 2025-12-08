@@ -873,6 +873,53 @@ class HybridMatchGenerator:
             'matches_created': total_matches
         }
 
+    def generate_matches_for_user(self, profile_id: str, top_n: int = 10) -> Dict:
+        """Generate hybrid matches for a single user"""
+        # Get user profile
+        profile_result = self.directory_service.get_profile_by_id(profile_id)
+        if not profile_result.get('success') or not profile_result.get('data'):
+            return {'success': False, 'error': 'Profile not found'}
+
+        target_profile = profile_result['data']
+
+        # Get all profiles for matching
+        all_profiles = self.directory_service.get_all_profiles_for_matching()
+        if not all_profiles:
+            return {'success': False, 'error': 'Failed to fetch profiles'}
+
+        # Get dismissed profiles
+        dismissed_ids = self.directory_service.get_dismissed_profile_ids(profile_id)
+
+        # Generate embedding for target if needed
+        if self.embedding_service and not target_profile.get('embedding'):
+            embedding = self.embedding_service.get_profile_embedding(target_profile)
+            target_profile['embedding_vector'] = embedding
+
+        # Generate matches
+        matches = self.generate_matches_for_profile(
+            target_profile, all_profiles, top_n=top_n, min_score=10.0,
+            dismissed_ids=dismissed_ids
+        )
+
+        # Store matches in database
+        matches_created = 0
+        for match in matches:
+            result = self.directory_service.create_match_suggestion(
+                profile_id=profile_id,
+                suggested_profile_id=match['profile']['id'],
+                match_score=match['score'],
+                match_reason=match['reason'],
+                source='hybrid_matcher'
+            )
+            if result['success']:
+                matches_created += 1
+
+        return {
+            'success': True,
+            'matches_created': matches_created,
+            'matches': matches
+        }
+
 
 def get_matcher(use_ai: bool = False, use_hybrid: bool = False, api_key: Optional[str] = None):
     """Factory function to get appropriate matcher"""
