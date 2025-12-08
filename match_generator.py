@@ -590,8 +590,287 @@ Return ONLY a JSON array, no preamble:
         }
 
 
-def get_matcher(use_ai: bool = False, api_key: Optional[str] = None):
+class HybridMatchGenerator:
+    """
+    Hybrid matcher combining multiple signals:
+    - Semantic similarity (embeddings): 35%
+    - Category overlap: 30%
+    - Keyword overlap: 20%
+    - Reach compatibility: 15%
+    """
+
+    WEIGHTS = {
+        'semantic': 0.35,
+        'category': 0.30,
+        'keyword': 0.20,
+        'reach': 0.15
+    }
+
+    def __init__(self, openai_api_key: Optional[str] = None):
+        self.directory_service = DirectoryService(use_admin=True)
+        self.keyword_matcher = MatchGenerator()
+
+        # Initialize embedding service if available
+        self.embedding_service = None
+        try:
+            from embedding_service import get_embedding_service
+            self.embedding_service = get_embedding_service(openai_api_key)
+        except Exception as e:
+            print(f"Embedding service not available: {e}")
+
+    def calculate_reach_compatibility(self, reach1: int, reach2: int) -> float:
+        """
+        Calculate reach compatibility score (0-100).
+        Higher score when reaches are complementary (big helps small).
+        """
+        if reach1 == 0 and reach2 == 0:
+            return 50.0  # Neutral if both unknown
+
+        # Both have reach - use ratio bonus
+        if reach1 > 0 and reach2 > 0:
+            larger = max(reach1, reach2)
+            smaller = min(reach1, reach2)
+            ratio = larger / smaller
+
+            # Slight bonus for complementary reaches (up to 10x difference)
+            if ratio <= 10:
+                return 70 + (ratio * 3)  # 73-100 range
+            else:
+                return 70.0  # Cap at 70 for very large differences
+
+        # One has reach, one doesn't - neutral
+        return 50.0
+
+    def calculate_hybrid_score(
+        self,
+        target_profile: Dict,
+        candidate_profile: Dict,
+        target_embedding: Optional[List[float]] = None,
+        candidate_embedding: Optional[List[float]] = None
+    ) -> Tuple[float, Dict[str, float], List[str], str]:
+        """
+        Calculate hybrid match score combining all signals.
+        Returns: (total_score, component_scores, common_keywords, collaboration_idea)
+        """
+        component_scores = {}
+
+        # 1. Keyword-based scores (from existing matcher)
+        target_text = ' '.join(filter(None, [
+            target_profile.get('business_focus', ''),
+            target_profile.get('service_provided', ''),
+            target_profile.get('company', '')
+        ]))
+        target_keywords = self.keyword_matcher.extract_keywords(target_text)
+        target_categories = self.keyword_matcher.get_categories(target_keywords)
+
+        candidate_text = ' '.join(filter(None, [
+            candidate_profile.get('business_focus', ''),
+            candidate_profile.get('service_provided', ''),
+            candidate_profile.get('company', '')
+        ]))
+        candidate_keywords = self.keyword_matcher.extract_keywords(candidate_text)
+        candidate_categories = self.keyword_matcher.get_categories(candidate_keywords)
+
+        # Keyword overlap score
+        common_keywords = target_keywords.intersection(candidate_keywords)
+        if target_keywords or candidate_keywords:
+            keyword_score = len(common_keywords) / max(len(target_keywords | candidate_keywords), 1) * 100
+        else:
+            keyword_score = 0.0
+        component_scores['keyword'] = keyword_score
+
+        # Category overlap score
+        common_categories = target_categories.intersection(candidate_categories)
+        if target_categories or candidate_categories:
+            category_score = len(common_categories) / max(len(target_categories | candidate_categories), 1) * 100
+        else:
+            category_score = 0.0
+        component_scores['category'] = category_score
+
+        # 2. Semantic similarity (if embeddings available)
+        if self.embedding_service and target_embedding and candidate_embedding:
+            semantic_sim = self.embedding_service.cosine_similarity(target_embedding, candidate_embedding)
+            semantic_score = max(0.0, semantic_sim * 100)
+        else:
+            # Fall back to keyword/category average if no embeddings
+            semantic_score = (keyword_score + category_score) / 2
+        component_scores['semantic'] = semantic_score
+
+        # 3. Reach compatibility
+        target_reach = target_profile.get('social_reach', 0) or 0
+        candidate_reach = candidate_profile.get('social_reach', 0) or 0
+        reach_score = self.calculate_reach_compatibility(target_reach, candidate_reach)
+        component_scores['reach'] = reach_score
+
+        # Calculate weighted total
+        total_score = (
+            component_scores['semantic'] * self.WEIGHTS['semantic'] +
+            component_scores['category'] * self.WEIGHTS['category'] +
+            component_scores['keyword'] * self.WEIGHTS['keyword'] +
+            component_scores['reach'] * self.WEIGHTS['reach']
+        )
+
+        # Generate collaboration idea
+        collaboration_idea = self.keyword_matcher.generate_collaboration_idea(
+            target_categories, candidate_categories
+        )
+
+        return round(total_score, 1), component_scores, list(common_keywords)[:5], collaboration_idea
+
+    def generate_matches_for_profile(
+        self,
+        target_profile: Dict,
+        all_profiles: List[Dict],
+        top_n: int = 10,
+        min_score: float = 15.0,
+        dismissed_ids: Optional[Set[str]] = None
+    ) -> List[Dict]:
+        """Generate top matches using hybrid scoring"""
+        if dismissed_ids is None:
+            dismissed_ids = set()
+
+        matches = []
+
+        # Get target embedding
+        target_embedding = target_profile.get('embedding_vector')
+        if not target_embedding and self.embedding_service:
+            target_embedding = self.embedding_service.get_profile_embedding(target_profile)
+
+        for candidate in all_profiles:
+            # Skip self and dismissed
+            if candidate['id'] == target_profile['id']:
+                continue
+            if candidate['id'] in dismissed_ids:
+                continue
+
+            # Get candidate embedding
+            candidate_embedding = candidate.get('embedding_vector')
+
+            # Calculate hybrid score
+            score, components, common_keywords, collaboration_idea = self.calculate_hybrid_score(
+                target_profile, candidate, target_embedding, candidate_embedding
+            )
+
+            if score >= min_score:
+                matches.append({
+                    'profile': candidate,
+                    'score': score,
+                    'component_scores': components,
+                    'common_keywords': common_keywords,
+                    'collaboration_idea': collaboration_idea,
+                    'reason': self.keyword_matcher.generate_match_reason(
+                        target_profile.get('name', ''),
+                        candidate.get('name', ''),
+                        common_keywords,
+                        score,
+                        collaboration_idea
+                    )
+                })
+
+        # Sort by score
+        matches.sort(key=lambda x: x['score'], reverse=True)
+        return matches[:top_n]
+
+    def generate_all_embeddings(self, batch_size: int = 50) -> Dict:
+        """Generate and store embeddings for all profiles without them"""
+        if not self.embedding_service:
+            return {'success': False, 'error': 'Embedding service not available'}
+
+        profiles = self.directory_service.get_profiles_without_embeddings(limit=1000)
+        if not profiles:
+            return {'success': True, 'profiles_updated': 0, 'message': 'All profiles have embeddings'}
+
+        updated = 0
+        errors = 0
+
+        for i in range(0, len(profiles), batch_size):
+            batch = profiles[i:i + batch_size]
+            texts = [self.embedding_service.profile_to_text(p) for p in batch]
+
+            try:
+                embeddings = self.embedding_service.get_embeddings_batch(texts)
+
+                for j, profile in enumerate(batch):
+                    result = self.directory_service.update_profile_embedding(
+                        profile['id'], embeddings[j]
+                    )
+                    if result['success']:
+                        updated += 1
+                    else:
+                        errors += 1
+            except Exception as e:
+                print(f"Batch embedding error: {e}")
+                errors += len(batch)
+
+            print(f"Progress: {i + len(batch)}/{len(profiles)} profiles processed")
+
+        return {
+            'success': True,
+            'profiles_updated': updated,
+            'errors': errors
+        }
+
+    def generate_all_matches(
+        self,
+        top_n: int = 10,
+        min_score: float = 15.0,
+        only_registered: bool = False
+    ) -> Dict:
+        """Generate hybrid matches for all profiles"""
+        # Get all profiles with embeddings
+        all_profiles = self.directory_service.get_all_profiles_for_matching()
+        if not all_profiles:
+            return {'success': False, 'error': 'Failed to fetch profiles'}
+
+        print(f"Loaded {len(all_profiles)} profiles for hybrid matching")
+
+        # Filter targets if needed
+        if only_registered:
+            target_profiles = [p for p in all_profiles if p.get('auth_user_id')]
+            print(f"Generating matches for {len(target_profiles)} registered users")
+        else:
+            target_profiles = all_profiles
+
+        total_matches = 0
+        profiles_processed = 0
+
+        for target in target_profiles:
+            # Get dismissed profiles for this user
+            dismissed_ids = self.directory_service.get_dismissed_profile_ids(target['id'])
+
+            # Generate matches
+            matches = self.generate_matches_for_profile(
+                target, all_profiles, top_n=top_n, min_score=min_score,
+                dismissed_ids=dismissed_ids
+            )
+
+            # Store matches
+            for match in matches:
+                result = self.directory_service.create_match_suggestion(
+                    profile_id=target['id'],
+                    suggested_profile_id=match['profile']['id'],
+                    match_score=match['score'],
+                    match_reason=match['reason'],
+                    source='hybrid_matcher'
+                )
+                if result['success']:
+                    total_matches += 1
+
+            profiles_processed += 1
+            if profiles_processed % 50 == 0:
+                print(f"  Processed {profiles_processed}/{len(target_profiles)}...")
+
+        return {
+            'success': True,
+            'profiles_processed': profiles_processed,
+            'matches_created': total_matches
+        }
+
+
+def get_matcher(use_ai: bool = False, use_hybrid: bool = False, api_key: Optional[str] = None):
     """Factory function to get appropriate matcher"""
+    if use_hybrid:
+        return HybridMatchGenerator(api_key)
     if use_ai:
         return AIMatchGenerator(api_key)
     return MatchGenerator()
@@ -612,7 +891,19 @@ if __name__ == '__main__':
             generator = AIMatchGenerator()
             result = generator.generate_all_matches(top_n=10, only_registered=True)
             print(f"\nResult: {result}")
+        elif sys.argv[1] == '--hybrid':
+            print("Generating hybrid matches for all profiles...")
+            generator = HybridMatchGenerator()
+            result = generator.generate_all_matches(top_n=10, min_score=15.0)
+            print(f"\nResult: {result}")
+        elif sys.argv[1] == '--embeddings':
+            print("Generating embeddings for all profiles...")
+            generator = HybridMatchGenerator()
+            result = generator.generate_all_embeddings()
+            print(f"\nResult: {result}")
     else:
         print("Usage:")
-        print("  python match_generator.py --all    # Keyword matching for all")
-        print("  python match_generator.py --ai     # AI matching (needs OPENROUTER_API_KEY)")
+        print("  python match_generator.py --all        # Keyword matching for all")
+        print("  python match_generator.py --ai         # AI matching (needs OPENROUTER_API_KEY)")
+        print("  python match_generator.py --hybrid     # Hybrid matching (needs OPENAI_API_KEY)")
+        print("  python match_generator.py --embeddings # Generate embeddings only")

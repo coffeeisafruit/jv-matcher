@@ -20,7 +20,7 @@ import zipfile
 try:
     from auth_service import AuthService, init_session_state
     from directory_service import DirectoryService
-    from match_generator import MatchGenerator, AIMatchGenerator
+    from match_generator import MatchGenerator, AIMatchGenerator, HybridMatchGenerator
     SUPABASE_AVAILABLE = True
 except ImportError:
     SUPABASE_AVAILABLE = False
@@ -985,7 +985,7 @@ def show_admin():
         st.error("Admin access required")
         return
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Add Profile", "Import CSV", "Export", "Generate Matches"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Add Profile", "Import CSV", "Export", "Generate Matches", "Embeddings"])
 
     with tab1:
         show_add_profile_form()
@@ -998,6 +998,80 @@ def show_admin():
 
     with tab4:
         show_generate_matches()
+
+    with tab5:
+        show_embeddings_admin()
+
+def show_embeddings_admin():
+    """Admin section for managing embeddings"""
+    st.markdown("### Profile Embeddings")
+
+    st.markdown("""
+    <div class="info-box">
+        <strong>Semantic Embeddings</strong><br>
+        Generate AI embeddings for profiles to enable semantic (meaning-based) matching.
+        This uses OpenAI's text-embedding-3-small model for higher quality matches.
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("")
+
+    # Check for OpenAI API key
+    has_openai_key = bool(os.getenv("OPENAI_API_KEY"))
+
+    if not has_openai_key:
+        st.warning("OPENAI_API_KEY not found in environment. Set it in Streamlit Cloud secrets or .env file.")
+
+    # Show embedding stats
+    directory_service = DirectoryService(use_admin=True)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        profiles_with = len(directory_service.get_profiles_with_embeddings(limit=10000))
+        st.metric("Profiles with Embeddings", profiles_with)
+
+    with col2:
+        profiles_without = len(directory_service.get_profiles_without_embeddings(limit=10000))
+        st.metric("Profiles without Embeddings", profiles_without)
+
+    st.markdown("---")
+
+    if st.button("Generate Embeddings for All Profiles", type="primary", disabled=not has_openai_key):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        status_text.text("Initializing embedding service...")
+
+        try:
+            generator = HybridMatchGenerator()
+
+            if not generator.embedding_service:
+                st.error("Embedding service could not be initialized. Check OPENAI_API_KEY.")
+                return
+
+            status_text.text("Generating embeddings...")
+            progress_bar.progress(20)
+
+            result = generator.generate_all_embeddings(batch_size=50)
+
+            progress_bar.progress(100)
+
+            if result['success']:
+                st.success("Embedding generation complete!")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Profiles Updated", result['profiles_updated'])
+                with col2:
+                    st.metric("Errors", result.get('errors', 0))
+
+                if result.get('message'):
+                    st.info(result['message'])
+            else:
+                st.error(f"Error: {result.get('error', 'Unknown error')}")
+
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
 
 def show_add_profile_form():
     """Form to add a new profile"""
@@ -1093,26 +1167,32 @@ def show_export_section():
             st.success(f"{len(df)} profiles exported")
 
 def show_generate_matches():
-    """Generate match suggestions using keyword or AI matching"""
+    """Generate match suggestions using keyword, AI, or hybrid matching"""
     st.markdown("### Generate Match Suggestions")
 
     # Matching mode selection
-    has_api_key = bool(os.getenv("OPENROUTER_API_KEY"))
+    has_openrouter_key = bool(os.getenv("OPENROUTER_API_KEY"))
+    has_openai_key = bool(os.getenv("OPENAI_API_KEY"))
 
     matching_mode = st.radio(
         "Matching Mode",
-        ["Keyword Matching (Fast)", "AI Matching (Higher Quality)"],
-        help="Keyword matching is fast and free. AI matching uses OpenRouter API for better results."
+        ["Keyword Matching (Fast)", "Hybrid Matching (Semantic + Keywords)", "AI Matching (Personalized Messages)"],
+        help="Keyword: fast and free. Hybrid: uses OpenAI embeddings for semantic matching. AI: uses OpenRouter for personalized messages."
     )
 
-    use_ai = matching_mode == "AI Matching (Higher Quality)"
+    use_ai = matching_mode == "AI Matching (Personalized Messages)"
+    use_hybrid = matching_mode == "Hybrid Matching (Semantic + Keywords)"
 
-    if use_ai and not has_api_key:
+    if use_ai and not has_openrouter_key:
         st.warning("AI matching requires OPENROUTER_API_KEY in environment. Using keyword matching.")
         use_ai = False
+    if use_hybrid and not has_openai_key:
+        st.warning("Hybrid matching requires OPENAI_API_KEY for semantic embeddings. Will fall back to keyword matching.")
 
     if use_ai:
         st.info("AI matching analyzes profiles and generates personalized outreach messages.")
+    elif use_hybrid:
+        st.info("Hybrid matching combines semantic similarity (35%), category overlap (30%), keyword overlap (20%), and reach compatibility (15%).")
     else:
         st.info("Keyword matching analyzes business_focus, service_provided, and company fields.")
 
@@ -1141,6 +1221,13 @@ def show_generate_matches():
                 generator = AIMatchGenerator()
                 result = generator.generate_all_matches(
                     top_n=top_n,
+                    only_registered=only_registered
+                )
+            elif use_hybrid:
+                generator = HybridMatchGenerator()
+                result = generator.generate_all_matches(
+                    top_n=top_n,
+                    min_score=float(min_score),
                     only_registered=only_registered
                 )
             else:

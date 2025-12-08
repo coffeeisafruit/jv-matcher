@@ -449,3 +449,69 @@ class DirectoryService:
             return response.data
         except Exception:
             return None
+
+    # ==========================================
+    # EMBEDDING OPERATIONS
+    # ==========================================
+
+    def update_profile_embedding(self, profile_id: str, embedding: List[float]) -> Dict[str, Any]:
+        """Store embedding vector for a profile"""
+        try:
+            import json
+            self.client.table("profiles") \
+                .update({"embedding": json.dumps(embedding)}) \
+                .eq("id", profile_id) \
+                .execute()
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_profiles_with_embeddings(self, limit: int = 10000) -> List[Dict[str, Any]]:
+        """Get all profiles that have embeddings stored"""
+        try:
+            response = self.client.table("profiles") \
+                .select("*") \
+                .not_.is_("embedding", "null") \
+                .order("name") \
+                .limit(limit) \
+                .execute()
+            return response.data
+        except Exception:
+            return []
+
+    def get_profiles_without_embeddings(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get profiles that need embeddings generated"""
+        try:
+            response = self.client.table("profiles") \
+                .select("*") \
+                .is_("embedding", "null") \
+                .order("name") \
+                .limit(limit) \
+                .execute()
+            return response.data
+        except Exception:
+            return []
+
+    def get_all_profiles_for_matching(self, limit: int = 10000) -> List[Dict[str, Any]]:
+        """Get all profiles with their embeddings for matching"""
+        try:
+            response = self.client.table("profiles") \
+                .select("*") \
+                .order("name") \
+                .limit(limit) \
+                .execute()
+
+            # Parse embeddings from JSON
+            import json
+            for profile in response.data:
+                if profile.get("embedding"):
+                    try:
+                        profile["embedding_vector"] = json.loads(profile["embedding"])
+                    except (json.JSONDecodeError, TypeError):
+                        profile["embedding_vector"] = None
+                else:
+                    profile["embedding_vector"] = None
+
+            return response.data
+        except Exception:
+            return []
