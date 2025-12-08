@@ -346,54 +346,54 @@ class DirectoryService:
         categories_interested: List[str],
         partnership_types: List[str]
     ) -> Dict[str, Any]:
-        """Save user preferences for matching"""
+        """Save user preferences for matching - stores in profile notes as JSON"""
+        import json
         try:
-            # Check if preferences exist
-            existing = self.client.table("profile_preferences") \
-                .select("id") \
-                .eq("profile_id", profile_id) \
-                .execute()
-
-            preference_data = {
+            # Store preferences as JSON in the notes field
+            preferences_json = json.dumps({
                 "categories_interested": categories_interested,
                 "partnership_types": partnership_types
-            }
+            })
 
-            if existing.data:
-                # Update existing preferences
-                self.client.table("profile_preferences") \
-                    .update(preference_data) \
-                    .eq("profile_id", profile_id) \
-                    .execute()
-            else:
-                # Create new preferences
-                preference_data["profile_id"] = profile_id
-                self.client.table("profile_preferences") \
-                    .insert(preference_data) \
-                    .execute()
+            self.client.table("profiles") \
+                .update({"notes": preferences_json}) \
+                .eq("id", profile_id) \
+                .execute()
 
             return {"success": True}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     def get_profile_preferences(self, profile_id: str) -> Dict[str, Any]:
-        """Get user's saved preferences"""
+        """Get user's saved preferences from profile notes"""
+        import json
         try:
-            response = self.client.table("profile_preferences") \
-                .select("*") \
-                .eq("profile_id", profile_id) \
+            response = self.client.table("profiles") \
+                .select("notes") \
+                .eq("id", profile_id) \
                 .single() \
                 .execute()
-            return {
-                "success": True,
-                "data": response.data
-            }
-        except Exception:
+
+            if response.data and response.data.get("notes"):
+                try:
+                    prefs = json.loads(response.data["notes"])
+                    return {"success": True, "data": prefs}
+                except json.JSONDecodeError:
+                    pass
+
             # Return default preferences if none exist
             return {
                 "success": True,
                 "data": {
-                    "categories_interested": ["all"],
+                    "categories_interested": [],
+                    "partnership_types": []
+                }
+            }
+        except Exception:
+            return {
+                "success": True,
+                "data": {
+                    "categories_interested": [],
                     "partnership_types": []
                 }
             }
