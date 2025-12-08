@@ -1022,7 +1022,7 @@ def show_preferences():
                 st.session_state.user_profile['preferred_partnership_types'] = selected_partnership_types
                 st.rerun()
             else:
-                st.error("Failed to save preferences")
+                st.error(f"Failed to save preferences: {result.get('error', 'Unknown error')}")
 
     with col2:
         if st.button("Reset", type="secondary", use_container_width=True):
