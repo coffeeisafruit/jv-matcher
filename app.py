@@ -934,23 +934,56 @@ def show_matches():
 
     with col_refresh_analysis:
         if st.button("Refresh Analysis", type="secondary", help="Regenerate rich analysis for all matches"):
-            with st.spinner("Regenerating analysis..."):
-                try:
-                    # Get all matches
-                    matches = directory_service.get_match_suggestions(user_profile['id'], status=None)
+            try:
+                # Get all matches
+                matches = directory_service.get_match_suggestions(user_profile['id'], status=None)
+                total = len(matches)
 
-                    # Regenerate analysis for each match
+                if total == 0:
+                    st.warning("No matches to refresh")
+                else:
+                    # Progress bar and status
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+
+                    # Use ThreadPoolExecutor for parallel processing (3 concurrent)
+                    from concurrent.futures import ThreadPoolExecutor, as_completed
+
                     count = 0
-                    for match in matches:
-                        # Call service to regenerate analysis
-                        result = directory_service.regenerate_match_analysis(match['id'])
-                        if result.get('success'):
-                            count += 1
+                    errors = 0
 
-                    st.success(f"Regenerated analysis for {count} matches!")
+                    def process_match(match):
+                        return directory_service.regenerate_match_analysis(match['id'])
+
+                    with ThreadPoolExecutor(max_workers=3) as executor:
+                        futures = {executor.submit(process_match, m): m for m in matches}
+
+                        for i, future in enumerate(as_completed(futures)):
+                            match = futures[future]
+                            match_name = match.get('suggested', {}).get('name', 'Unknown')
+
+                            try:
+                                result = future.result()
+                                if result.get('success'):
+                                    count += 1
+                                else:
+                                    errors += 1
+                            except Exception:
+                                errors += 1
+
+                            # Update progress
+                            progress = (i + 1) / total
+                            progress_bar.progress(progress)
+                            status_text.text(f"Processing {i + 1}/{total}: {match_name}")
+
+                    progress_bar.empty()
+                    status_text.empty()
+                    st.success(f"Regenerated analysis for {count}/{total} matches!")
+                    if errors > 0:
+                        st.warning(f"{errors} matches failed - they may not have valid profiles")
                     st.rerun()
-                except Exception as e:
-                    st.error(f"Error regenerating analysis: {str(e)}")
+            except Exception as e:
+                st.error(f"Error regenerating analysis: {str(e)}")
 
     st.markdown("---")
 
