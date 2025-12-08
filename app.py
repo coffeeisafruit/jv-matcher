@@ -747,104 +747,114 @@ def process_transcripts_with_database(uploaded_files, matches_per_person, save_t
 
         for i, transcript in enumerate(transcripts):
             progress_pct = 15 + int((i / total_transcripts) * 50)
-            status_text.text(f"AI extracting profile from {transcript['filename']}...")
+            status_text.text(f"AI extracting ALL profiles from {transcript['filename']} (chunking large files)...")
             progress_bar.progress(progress_pct)
 
-            # Use AI to extract structured profile data
-            extraction_result = profile_extractor.extract_profile_from_transcript(transcript['content'])
+            # Use AI to extract ALL profiles from transcript (handles large files via chunking)
+            extraction_result = profile_extractor.extract_all_profiles_from_transcript(transcript['content'])
 
             if not extraction_result.get('success'):
-                st.warning(f"Could not extract profile from {transcript['filename']}: {extraction_result.get('error', 'Unknown error')}")
+                st.warning(f"Could not extract profiles from {transcript['filename']}: {extraction_result.get('error', 'Unknown error')}")
                 continue
 
-            extracted_data = extraction_result.get('data', {})
-            extraction_confidence = extraction_result.get('confidence', 0)
+            # Get list of all extracted profiles
+            profiles_list = extraction_result.get('profiles', [])
+            chunks_processed = extraction_result.get('chunks_processed', 1)
 
-            # Skip if no valid name extracted
-            if not extracted_data.get('name') or extracted_data.get('name').lower() in ['unknown', 'participant', 'mobile', 'email', 'introducing']:
-                st.warning(f"No valid profile name found in {transcript['filename']}")
+            if not profiles_list:
+                st.warning(f"No valid profiles found in {transcript['filename']}")
                 continue
 
-            extracted_profiles.append({
-                'filename': transcript['filename'],
-                'data': extracted_data,
-                'confidence': extraction_confidence
-            })
+            st.info(f"Found {len(profiles_list)} profiles in {transcript['filename']} ({chunks_processed} chunks processed)")
 
-            # Save to database if requested
-            if save_to_database and SUPABASE_AVAILABLE:
-                # Use confidence-based matching to find existing profile
-                match_result = profile_extractor.find_matching_profile(extracted_data)
+            # Process each extracted profile
+            for extracted_data in profiles_list:
+                extraction_confidence = extracted_data.get('confidence', 0)
 
-                action = match_result.get('action', 'review')
-                profile_id = match_result.get('profile_id')
-                match_confidence = match_result.get('confidence', 0)
+                # Skip if no valid name extracted
+                if not extracted_data.get('name') or extracted_data.get('name').lower() in ['unknown', 'participant', 'mobile', 'email', 'introducing', 'speaker', 'none']:
+                    continue
 
-                if action == 'update' and profile_id:
-                    # Update existing profile with new rich data
-                    update_data = {
-                        'what_you_do': extracted_data.get('what_you_do'),
-                        'who_you_serve': extracted_data.get('who_you_serve'),
-                        'seeking': extracted_data.get('seeking'),
-                        'offering': extracted_data.get('offering'),
-                        'current_projects': extracted_data.get('current_projects'),
-                        'business_focus': extracted_data.get('business_focus'),
-                    }
-                    # Only update fields that have values
-                    update_data = {k: v for k, v in update_data.items() if v}
+                extracted_profiles.append({
+                    'filename': transcript['filename'],
+                    'data': extracted_data,
+                    'confidence': extraction_confidence
+                })
 
-                    if update_data:
-                        result = directory_service.update_profile(profile_id, update_data)
+                # Save to database if requested
+                if save_to_database and SUPABASE_AVAILABLE:
+                    # Use confidence-based matching to find existing profile
+                    match_result = profile_extractor.find_matching_profile(extracted_data)
+
+                    action = match_result.get('action', 'review')
+                    profile_id = match_result.get('profile_id')
+                    match_confidence = match_result.get('confidence', 0)
+
+                    if action == 'update' and profile_id:
+                        # Update existing profile with new rich data
+                        update_data = {
+                            'what_you_do': extracted_data.get('what_you_do'),
+                            'who_you_serve': extracted_data.get('who_you_serve'),
+                            'seeking': extracted_data.get('seeking'),
+                            'offering': extracted_data.get('offering'),
+                            'current_projects': extracted_data.get('current_projects'),
+                            'business_focus': extracted_data.get('business_focus'),
+                        }
+                        # Only update fields that have values
+                        update_data = {k: v for k, v in update_data.items() if v}
+
+                        if update_data:
+                            result = directory_service.update_profile(profile_id, update_data)
+                            if result.get('success'):
+                                profiles_updated += 1
+
+                    elif action == 'create':
+                        # Create new profile with all extracted data
+                        create_data = {
+                            'name': extracted_data.get('name'),
+                            'email': extracted_data.get('email'),
+                            'company': extracted_data.get('company'),
+                            'business_focus': extracted_data.get('business_focus'),
+                            'what_you_do': extracted_data.get('what_you_do'),
+                            'who_you_serve': extracted_data.get('who_you_serve'),
+                            'seeking': extracted_data.get('seeking'),
+                            'offering': extracted_data.get('offering'),
+                            'current_projects': extracted_data.get('current_projects'),
+                            'list_size': extracted_data.get('list_size', 0) or 0,
+                            'social_reach': extracted_data.get('social_reach', 0) or 0,
+                            'status': 'Active',
+                        }
+                        # Remove None values
+                        create_data = {k: v for k, v in create_data.items() if v is not None}
+
+                        result = directory_service.create_profile(create_data)
                         if result.get('success'):
-                            profiles_updated += 1
+                            profiles_created += 1
+                            profile_id = result.get('data', {}).get('id')
 
-                elif action == 'create':
-                    # Create new profile with all extracted data
-                    create_data = {
-                        'name': extracted_data.get('name'),
-                        'email': extracted_data.get('email'),
-                        'company': extracted_data.get('company'),
-                        'business_focus': extracted_data.get('business_focus'),
-                        'what_you_do': extracted_data.get('what_you_do'),
-                        'who_you_serve': extracted_data.get('who_you_serve'),
-                        'seeking': extracted_data.get('seeking'),
-                        'offering': extracted_data.get('offering'),
-                        'current_projects': extracted_data.get('current_projects'),
-                        'list_size': extracted_data.get('list_size', 0),
-                        'social_reach': extracted_data.get('social_reach', 0),
-                        'status': 'Active',
-                    }
-                    # Remove None values
-                    create_data = {k: v for k, v in create_data.items() if v is not None}
-
-                    result = directory_service.create_profile(create_data)
-                    if result.get('success'):
-                        profiles_created += 1
-                        profile_id = result.get('data', {}).get('id')
-
-                elif action == 'review':
-                    # Queue for manual review
-                    profile_extractor.queue_for_review(
-                        extracted_data,
-                        match_result,
-                        transcript['content'][:5000],
-                        notes=f"From file: {transcript['filename']}"
-                    )
-                    profiles_queued += 1
-
-                # Generate matches for new/updated profiles
-                if profile_id and action in ['create', 'update']:
-                    status_text.text(f"Generating matches for {extracted_data.get('name')}...")
-                    try:
-                        match_result = match_generator.generate_matches_for_user(
-                            profile_id,
-                            top_n=matches_per_person,
-                            generate_rich_analysis=True
+                    elif action == 'review':
+                        # Queue for manual review
+                        profile_extractor.queue_for_review(
+                            extracted_data,
+                            match_result,
+                            transcript['content'][:5000],
+                            notes=f"From file: {transcript['filename']}"
                         )
-                        if match_result.get('success'):
-                            matches_generated += len(match_result.get('matches', []))
-                    except Exception as match_error:
-                        st.warning(f"Could not generate matches for {extracted_data.get('name')}: {str(match_error)}")
+                        profiles_queued += 1
+
+                    # Generate matches for new/updated profiles
+                    if profile_id and action in ['create', 'update']:
+                        status_text.text(f"Generating matches for {extracted_data.get('name')}...")
+                        try:
+                            gen_result = match_generator.generate_matches_for_user(
+                                profile_id,
+                                top_n=matches_per_person,
+                                generate_rich_analysis=True
+                            )
+                            if gen_result.get('success'):
+                                matches_generated += len(gen_result.get('matches', []))
+                        except Exception as match_error:
+                            pass  # Skip match errors for individual profiles to not interrupt processing
 
         # Run conversation analysis on each transcript
         conversation_results = []

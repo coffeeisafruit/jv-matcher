@@ -1,6 +1,7 @@
 """
 Conversation Analyzer - Extracts signals from networking transcripts
 Handles both single-person intros and multi-person group conversations
+Supports chunked processing for large transcripts
 """
 import os
 import re
@@ -15,6 +16,9 @@ from directory_service import DirectoryService
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Token/character limits for chunking
+MAX_CHUNK_CHARS = 12000  # ~3000 tokens, safe for gpt-5-nano
 
 
 class ConversationAnalyzer:
@@ -124,6 +128,7 @@ class ConversationAnalyzer:
     ) -> Dict[str, Any]:
         """
         Use GPT to extract structured conversation data
+        Handles large transcripts by chunking
 
         Args:
             transcript: The transcript text
@@ -132,7 +137,107 @@ class ConversationAnalyzer:
         Returns:
             Dict with success status and extracted data
         """
-        prompt = self._build_extraction_prompt(transcript, transcript_type)
+        try:
+            # Check if transcript needs chunking
+            if len(transcript) <= MAX_CHUNK_CHARS:
+                # Small transcript - process directly
+                return self._extract_signals_from_chunk(transcript, transcript_type)
+
+            # Large transcript - chunk and process
+            chunks = self._chunk_transcript(transcript)
+            logger.info(f"Split transcript into {len(chunks)} chunks for analysis")
+
+            all_speakers = []
+            all_topics = []
+            all_signals = []
+            all_connections = []
+
+            for i, chunk in enumerate(chunks):
+                logger.info(f"Analyzing chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
+                result = self._extract_signals_from_chunk(chunk, transcript_type)
+
+                if result.get("success") and result.get("data"):
+                    data = result["data"]
+                    all_speakers.extend(data.get("speakers", []))
+                    all_topics.extend(data.get("topics", []))
+                    all_signals.extend(data.get("signals", []))
+                    all_connections.extend(data.get("connections", []))
+
+            # Merge and deduplicate results
+            merged_data = {
+                "speakers": self._deduplicate_speakers(all_speakers),
+                "topics": self._deduplicate_topics(all_topics),
+                "signals": all_signals,  # Keep all signals
+                "connections": self._deduplicate_connections(all_connections)
+            }
+
+            logger.info(f"Merged results: {len(merged_data['speakers'])} speakers, "
+                       f"{len(merged_data['topics'])} topics, "
+                       f"{len(merged_data['signals'])} signals")
+
+            return {"success": True, "data": merged_data}
+
+        except Exception as e:
+            logger.error(f"Extraction error: {e}")
+            return {"success": False, "error": str(e), "data": {}}
+
+    def _chunk_transcript(self, text: str) -> List[str]:
+        """
+        Split a large transcript into processable chunks
+        Tries to split on speaker boundaries to maintain context
+
+        Args:
+            text: Full transcript text
+
+        Returns:
+            List of transcript chunks
+        """
+        # Pattern to match speaker lines like "[Name] 10:35:12" or "Name:"
+        speaker_pattern = r'(?=\[[^\]]+\]\s*\d{1,2}:\d{2}:\d{2}|\n[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*:)'
+
+        # Split on speaker boundaries
+        segments = re.split(speaker_pattern, text)
+
+        chunks = []
+        current_chunk = ""
+
+        for segment in segments:
+            # If adding this segment would exceed limit, save current chunk
+            if len(current_chunk) + len(segment) > MAX_CHUNK_CHARS and current_chunk:
+                chunks.append(current_chunk.strip())
+                current_chunk = segment
+            else:
+                current_chunk += segment
+
+        # Add final chunk
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+
+        # If we couldn't split by speakers, fall back to simple character splits
+        if len(chunks) <= 1 and len(text) > MAX_CHUNK_CHARS:
+            chunks = []
+            for i in range(0, len(text), MAX_CHUNK_CHARS):
+                chunk = text[i:i + MAX_CHUNK_CHARS]
+                # Try to end at a sentence or line break
+                last_break = max(chunk.rfind('\n'), chunk.rfind('. '), chunk.rfind('? '), chunk.rfind('! '))
+                if last_break > MAX_CHUNK_CHARS * 0.7:  # Only if we find a break in last 30%
+                    chunk = chunk[:last_break + 1]
+                chunks.append(chunk)
+
+        return chunks
+
+    def _extract_signals_from_chunk(self, chunk: str, transcript_type: str) -> Dict[str, Any]:
+        """
+        Extract signals from a single chunk of transcript
+
+        Args:
+            chunk: Transcript chunk text
+            transcript_type: 'solo_intro' or 'group'
+
+        Returns:
+            Dict with extracted data
+        """
+        prompt = self._build_extraction_prompt(chunk, transcript_type)
 
         try:
             response = self.client.chat.completions.create(
@@ -148,15 +253,147 @@ class ConversationAnalyzer:
             )
 
             data = json.loads(response.choices[0].message.content)
-            logger.info(f"Extracted {len(data.get('speakers', []))} speakers, "
+            logger.info(f"Chunk: {len(data.get('speakers', []))} speakers, "
                        f"{len(data.get('topics', []))} topics, "
                        f"{len(data.get('signals', []))} signals")
 
             return {"success": True, "data": data}
 
         except Exception as e:
-            logger.error(f"Extraction error: {e}")
+            logger.error(f"Chunk extraction error: {e}")
             return {"success": False, "error": str(e), "data": {}}
+
+    def _deduplicate_speakers(self, speakers: List[Dict]) -> List[Dict]:
+        """
+        Deduplicate speakers by name similarity, merging their data
+
+        Args:
+            speakers: List of speaker dicts
+
+        Returns:
+            List of unique speakers with merged data
+        """
+        if not speakers:
+            return []
+
+        unique = []
+
+        for speaker in speakers:
+            name = speaker.get("name", "").strip()
+            if not name:
+                continue
+
+            # Check if this speaker matches any existing unique speaker
+            found_match = False
+            for existing in unique:
+                existing_name = existing.get("name", "").strip()
+                similarity = self._name_similarity(name, existing_name)
+
+                if similarity >= 0.85:
+                    # Merge data into existing speaker
+                    self._merge_speaker_data(existing, speaker)
+                    found_match = True
+                    break
+
+            if not found_match:
+                unique.append(speaker.copy())
+
+        return unique
+
+    def _merge_speaker_data(self, target: Dict, source: Dict):
+        """Merge speaker data from source into target"""
+        # Merge speaker_text
+        if source.get("speaker_text") and target.get("speaker_text"):
+            if source["speaker_text"] not in target["speaker_text"]:
+                target["speaker_text"] = f"{target['speaker_text']} {source['speaker_text']}"
+        elif source.get("speaker_text"):
+            target["speaker_text"] = source["speaker_text"]
+
+        # Merge profile_data
+        target_profile = target.get("profile_data", {})
+        source_profile = source.get("profile_data", {})
+
+        for field in ["what_you_do", "who_you_serve", "seeking", "offering", "current_projects"]:
+            if not target_profile.get(field) and source_profile.get(field):
+                target_profile[field] = source_profile[field]
+
+        target["profile_data"] = target_profile
+
+    def _deduplicate_topics(self, topics: List[Dict]) -> List[Dict]:
+        """
+        Deduplicate topics by name similarity
+
+        Args:
+            topics: List of topic dicts
+
+        Returns:
+            List of unique topics with merged relevance scores
+        """
+        if not topics:
+            return []
+
+        unique = []
+
+        for topic in topics:
+            name = topic.get("topic_name", "").strip().lower()
+            if not name:
+                continue
+
+            # Check if this topic already exists
+            found_match = False
+            for existing in unique:
+                existing_name = existing.get("topic_name", "").strip().lower()
+                if name == existing_name or self._name_similarity(name, existing_name) >= 0.9:
+                    # Merge - take max relevance score and combine mentioned_by
+                    existing["relevance_score"] = max(
+                        existing.get("relevance_score", 0),
+                        topic.get("relevance_score", 0)
+                    )
+                    mentioned = set(existing.get("mentioned_by", []) or [])
+                    mentioned.update(topic.get("mentioned_by", []) or [])
+                    existing["mentioned_by"] = list(mentioned)
+                    found_match = True
+                    break
+
+            if not found_match:
+                unique.append(topic.copy())
+
+        # Sort by relevance score
+        unique.sort(key=lambda t: t.get("relevance_score", 0), reverse=True)
+
+        return unique
+
+    def _deduplicate_connections(self, connections: List[Dict]) -> List[Dict]:
+        """
+        Deduplicate connection suggestions
+
+        Args:
+            connections: List of connection dicts
+
+        Returns:
+            List of unique connections
+        """
+        if not connections:
+            return []
+
+        unique = []
+        seen_pairs = set()
+
+        for conn in connections:
+            from_speaker = conn.get("from_speaker", "").strip()
+            to_speaker = conn.get("to_speaker", "").strip()
+
+            if not from_speaker or not to_speaker:
+                continue
+
+            # Create a normalized pair key (order-independent)
+            pair_key = tuple(sorted([from_speaker.lower(), to_speaker.lower()]))
+
+            if pair_key not in seen_pairs:
+                seen_pairs.add(pair_key)
+                unique.append(conn)
+
+        return unique
 
     def _build_extraction_prompt(self, transcript: str, transcript_type: str) -> str:
         """Build the GPT extraction prompt based on transcript type"""
@@ -166,7 +403,7 @@ class ConversationAnalyzer:
 Analyze this individual introduction transcript and extract structured data.
 
 TRANSCRIPT:
-{transcript[:15000]}
+{transcript}
 
 Return a JSON object with:
 {{
@@ -212,7 +449,7 @@ Extract specific, concrete signals - not general business descriptions.
 Analyze this GROUP networking conversation transcript and extract structured data.
 
 TRANSCRIPT:
-{transcript[:15000]}
+{transcript}
 
 Return a JSON object with:
 {{

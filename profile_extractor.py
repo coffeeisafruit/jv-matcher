@@ -1,8 +1,10 @@
 """
 AI Profile Extractor for Rich JV Matching System
 Extracts structured profile data from transcripts and matches to existing profiles
+Supports chunked processing for large transcripts
 """
 import os
+import re
 import json
 import logging
 from typing import Dict, Any, List, Optional
@@ -14,6 +16,9 @@ from directory_service import DirectoryService
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Token/character limits for chunking
+MAX_CHUNK_CHARS = 12000  # ~3000 tokens, safe for gpt-5-nano
 
 
 class AIProfileExtractor:
@@ -103,6 +108,268 @@ class AIProfileExtractor:
                 "error": str(e),
                 "data": {}
             }
+
+    def extract_all_profiles_from_transcript(self, transcript_text: str) -> Dict[str, Any]:
+        """
+        Extract ALL profiles from a transcript (handles large multi-speaker transcripts)
+
+        This method:
+        1. Splits large transcripts into chunks
+        2. Extracts profiles from each chunk
+        3. Merges and deduplicates results
+
+        Args:
+            transcript_text: The raw transcript text (any size)
+
+        Returns:
+            Dict containing list of all extracted profiles
+        """
+        try:
+            logger.info(f"Extracting all profiles from transcript ({len(transcript_text)} chars)")
+
+            # Check if transcript is small enough to process directly
+            if len(transcript_text) <= MAX_CHUNK_CHARS:
+                # Small transcript - extract multiple profiles in one call
+                return self._extract_multiple_profiles(transcript_text)
+
+            # Large transcript - chunk and process
+            chunks = self._chunk_transcript(transcript_text)
+            logger.info(f"Split transcript into {len(chunks)} chunks")
+
+            all_profiles = []
+
+            for i, chunk in enumerate(chunks):
+                logger.info(f"Processing chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
+                result = self._extract_multiple_profiles(chunk)
+
+                if result.get("success") and result.get("profiles"):
+                    all_profiles.extend(result["profiles"])
+
+            # Deduplicate profiles by name similarity
+            unique_profiles = self._deduplicate_profiles(all_profiles)
+            logger.info(f"Extracted {len(unique_profiles)} unique profiles from {len(all_profiles)} total")
+
+            return {
+                "success": True,
+                "profiles": unique_profiles,
+                "total_extracted": len(all_profiles),
+                "unique_count": len(unique_profiles),
+                "chunks_processed": len(chunks)
+            }
+
+        except Exception as e:
+            logger.error(f"Error extracting all profiles: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "profiles": []
+            }
+
+    def _chunk_transcript(self, text: str) -> List[str]:
+        """
+        Split a large transcript into processable chunks
+
+        Tries to split on speaker boundaries to maintain context
+
+        Args:
+            text: Full transcript text
+
+        Returns:
+            List of transcript chunks
+        """
+        # Pattern to match speaker lines like "[Name] 10:35:12" or "Name:"
+        speaker_pattern = r'(?=\[[^\]]+\]\s*\d{1,2}:\d{2}:\d{2}|\n[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*:)'
+
+        # Split on speaker boundaries
+        segments = re.split(speaker_pattern, text)
+
+        chunks = []
+        current_chunk = ""
+
+        for segment in segments:
+            # If adding this segment would exceed limit, save current chunk
+            if len(current_chunk) + len(segment) > MAX_CHUNK_CHARS and current_chunk:
+                chunks.append(current_chunk.strip())
+                current_chunk = segment
+            else:
+                current_chunk += segment
+
+        # Add final chunk
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+
+        # If we couldn't split by speakers, fall back to simple character splits
+        if len(chunks) <= 1 and len(text) > MAX_CHUNK_CHARS:
+            chunks = []
+            for i in range(0, len(text), MAX_CHUNK_CHARS):
+                chunk = text[i:i + MAX_CHUNK_CHARS]
+                # Try to end at a sentence or line break
+                last_break = max(chunk.rfind('\n'), chunk.rfind('. '), chunk.rfind('? '), chunk.rfind('! '))
+                if last_break > MAX_CHUNK_CHARS * 0.7:  # Only if we find a break in last 30%
+                    chunk = chunk[:last_break + 1]
+                chunks.append(chunk)
+
+        return chunks
+
+    def _extract_multiple_profiles(self, text: str) -> Dict[str, Any]:
+        """
+        Extract multiple profiles from a single chunk of text
+
+        Args:
+            text: Transcript text chunk
+
+        Returns:
+            Dict with list of extracted profiles
+        """
+        try:
+            prompt = """
+            Extract ALL speaker profiles from this networking transcript.
+            This is a multi-person conversation - identify EVERY person who speaks and their business information.
+
+            Return a JSON object with:
+            {
+                "profiles": [
+                    {
+                        "name": "Person's full name (extract from speaker labels like [Name] or 'Name:')",
+                        "email": "Email if mentioned, null otherwise",
+                        "company": "Company or brand name if mentioned",
+                        "what_you_do": "What they do/offer (2-3 sentences based on what they said)",
+                        "who_you_serve": "Target audience mentioned",
+                        "seeking": "What they're looking for in partnerships",
+                        "offering": "What they can offer to partners",
+                        "current_projects": "Active projects mentioned",
+                        "contact": "Contact info if shared (website, social, etc)",
+                        "business_focus": "Primary business category",
+                        "list_size": 0,
+                        "social_reach": 0
+                    }
+                ]
+            }
+
+            IMPORTANT:
+            - Extract EVERY unique speaker, not just the main one
+            - Look for speaker labels like "[Name - Company]" or "Name:"
+            - Include people even if they only say a few things
+            - Use null for fields not mentioned
+            - For list_size/social_reach, extract numbers if mentioned (e.g., "30,000 VIPs" = 30000)
+
+            Transcript:
+            """
+
+            response = self.client.chat.completions.create(
+                model="gpt-5-nano",
+                messages=[
+                    {"role": "system", "content": "You are an expert at identifying all speakers in networking conversations and extracting their business profile data."},
+                    {"role": "user", "content": f"{prompt}\n\n{text}"}
+                ],
+                response_format={"type": "json_object"}
+            )
+
+            result = json.loads(response.choices[0].message.content)
+            profiles = result.get("profiles", [])
+
+            # Add confidence scores to each profile
+            for profile in profiles:
+                profile["confidence"] = self._calculate_extraction_confidence(profile)
+
+            # Filter out invalid profiles (no name or generic names)
+            valid_profiles = [
+                p for p in profiles
+                if p.get("name") and p["name"].lower() not in [
+                    "unknown", "participant", "speaker", "mobile", "email", "introducing", "none"
+                ]
+            ]
+
+            logger.info(f"Extracted {len(valid_profiles)} valid profiles from chunk")
+
+            return {
+                "success": True,
+                "profiles": valid_profiles
+            }
+
+        except Exception as e:
+            logger.error(f"Error extracting multiple profiles: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "profiles": []
+            }
+
+    def _deduplicate_profiles(self, profiles: List[Dict]) -> List[Dict]:
+        """
+        Remove duplicate profiles based on name similarity
+        Merges data from duplicates into the most complete profile
+
+        Args:
+            profiles: List of extracted profiles (may contain duplicates)
+
+        Returns:
+            List of unique profiles with merged data
+        """
+        if not profiles:
+            return []
+
+        unique = []
+
+        for profile in profiles:
+            name = profile.get("name", "").strip()
+            if not name:
+                continue
+
+            # Check if this profile matches any existing unique profile
+            found_match = False
+            for existing in unique:
+                existing_name = existing.get("name", "").strip()
+                similarity = self._fuzzy_match(
+                    self._normalize_name(name),
+                    self._normalize_name(existing_name)
+                )
+
+                if similarity >= 0.85:  # 85% name similarity = same person
+                    # Merge data into existing profile (prefer non-null values)
+                    self._merge_profile_data(existing, profile)
+                    found_match = True
+                    break
+
+            if not found_match:
+                unique.append(profile.copy())
+
+        # Sort by confidence
+        unique.sort(key=lambda p: p.get("confidence", 0), reverse=True)
+
+        return unique
+
+    def _merge_profile_data(self, target: Dict, source: Dict):
+        """
+        Merge data from source profile into target profile
+        Prefers existing non-null values but fills in gaps
+
+        Args:
+            target: Profile to merge into (modified in place)
+            source: Profile to merge from
+        """
+        mergeable_fields = [
+            "email", "company", "what_you_do", "who_you_serve",
+            "seeking", "offering", "current_projects", "contact", "business_focus"
+        ]
+
+        for field in mergeable_fields:
+            # If target doesn't have this field, use source's value
+            if not target.get(field) and source.get(field):
+                target[field] = source[field]
+            # If both have values, concatenate if they're different
+            elif target.get(field) and source.get(field):
+                if field in ["what_you_do", "seeking", "offering"] and \
+                   target[field] != source[field] and \
+                   source[field] not in target[field]:
+                    target[field] = f"{target[field]} {source[field]}"
+
+        # For numeric fields, take the maximum
+        for field in ["list_size", "social_reach"]:
+            target[field] = max(target.get(field, 0) or 0, source.get(field, 0) or 0)
+
+        # Update confidence to max
+        target["confidence"] = max(target.get("confidence", 0), source.get("confidence", 0))
 
     def _calculate_extraction_confidence(self, profile_data: Dict[str, Any]) -> float:
         """
