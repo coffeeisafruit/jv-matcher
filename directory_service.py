@@ -680,6 +680,17 @@ class DirectoryService:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    def update_match_outreach(self, match_id: str, outreach_message: str) -> Dict[str, Any]:
+        """Update the outreach message for a match"""
+        try:
+            self.client.table("match_suggestions") \
+                .update({"outreach_message": outreach_message}) \
+                .eq("id", match_id) \
+                .execute()
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     def regenerate_match_analysis(self, match_id: str) -> Dict[str, Any]:
         """Regenerate rich analysis for a specific match using RichMatchService"""
         try:

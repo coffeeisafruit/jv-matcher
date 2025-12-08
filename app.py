@@ -1110,17 +1110,28 @@ def show_matches():
                         if analysis.get('timing'):
                             st.markdown(f"**Timing:** {analysis['timing']}")
 
-                        # Pre-fill outreach message from analysis if available
-                        if analysis.get('outreach_message') and not match.get('outreach_message'):
-                            match['outreach_message'] = analysis['outreach_message']
-
                     except (json.JSONDecodeError, TypeError):
-                        pass
+                        analysis = {}
 
                 # Match reason (fallback if no rich analysis)
                 if match.get('match_reason') and not rich_analysis:
                     st.markdown("---")
                     st.markdown(f"**Why this match:** {match['match_reason']}")
+
+                # Get outreach message - prefer saved, then from analysis, then generate default
+                default_outreach = ""
+                if rich_analysis:
+                    try:
+                        if isinstance(rich_analysis, str):
+                            analysis = json.loads(rich_analysis)
+                        else:
+                            analysis = rich_analysis
+                        default_outreach = analysis.get('outreach_message', '')
+                    except:
+                        pass
+
+                saved_outreach = match.get('outreach_message', '')
+                initial_outreach = saved_outreach if saved_outreach else default_outreach
 
                 # Outreach message section
                 st.markdown("---")
@@ -1128,9 +1139,9 @@ def show_matches():
 
                 outreach_message = st.text_area(
                     "Draft your outreach message",
-                    value=match.get('outreach_message', ''),
+                    value=initial_outreach,
                     key=f"outreach_{match['id']}",
-                    help="Draft your message to this potential partner"
+                    help="Edit and personalize this AI-generated message"
                 )
 
                 # Save outreach message if changed

@@ -37,6 +37,7 @@ ALTER TABLE match_suggestions ADD COLUMN IF NOT EXISTS analysis_generated_at TIM
 ALTER TABLE match_suggestions ADD COLUMN IF NOT EXISTS email_sent_at TIMESTAMPTZ;
 ALTER TABLE match_suggestions ADD COLUMN IF NOT EXISTS user_feedback VARCHAR(20);
 ALTER TABLE match_suggestions ADD COLUMN IF NOT EXISTS feedback_at TIMESTAMPTZ;
+ALTER TABLE match_suggestions ADD COLUMN IF NOT EXISTS outreach_message TEXT;
 
 -- ============================================
 -- ANALYTICS EVENTS TABLE - New
