@@ -7,8 +7,10 @@ import os
 import re
 import json
 import logging
+import hashlib
 from typing import Dict, Any, List, Optional
 from difflib import SequenceMatcher
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 from supabase_client import get_admin_client
 from directory_service import DirectoryService
@@ -18,7 +20,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Token/character limits for chunking
-MAX_CHUNK_CHARS = 12000  # ~3000 tokens, safe for gpt-5-nano
+MAX_CHUNK_CHARS = 24000  # ~6000 tokens - larger chunks = fewer API calls
+MAX_PARALLEL_CHUNKS = 4  # Process up to 4 chunks concurrently
 
 
 class ConversationAnalyzer:
@@ -40,10 +43,54 @@ class ConversationAnalyzer:
         self.directory_service = DirectoryService(use_admin=True)
         self.supabase = get_admin_client()
 
+    def _get_transcript_hash(self, text: str) -> str:
+        """Generate a hash of transcript content for duplicate detection"""
+        # Normalize whitespace and compute hash
+        normalized = " ".join(text.split())
+        return hashlib.md5(normalized.encode()).hexdigest()
+
+    def is_transcript_processed(self, transcript_text: str) -> Dict[str, Any]:
+        """
+        Check if a transcript has already been processed
+
+        Args:
+            transcript_text: The transcript text to check
+
+        Returns:
+            Dict with {is_duplicate: bool, transcript_id: str|None}
+        """
+        try:
+            content_hash = self._get_transcript_hash(transcript_text)
+
+            # Check for existing transcript with same hash (stored in first 50k chars)
+            # Use first 100 chars as a quick match indicator
+            first_100 = transcript_text[:100].strip()
+
+            existing = self.supabase.table("conversation_transcripts") \
+                .select("id, event_name, created_at") \
+                .ilike("transcript_text", f"{first_100}%") \
+                .limit(1) \
+                .execute()
+
+            if existing.data:
+                return {
+                    "is_duplicate": True,
+                    "transcript_id": existing.data[0]["id"],
+                    "event_name": existing.data[0].get("event_name"),
+                    "created_at": existing.data[0].get("created_at")
+                }
+
+            return {"is_duplicate": False, "transcript_id": None}
+
+        except Exception as e:
+            logger.warning(f"Duplicate check failed: {e}")
+            return {"is_duplicate": False, "transcript_id": None}
+
     def analyze_transcript(
         self,
         transcript_text: str,
-        event_name: str = None
+        event_name: str = None,
+        skip_if_processed: bool = True
     ) -> Dict[str, Any]:
         """
         Main entry point - analyzes a transcript and returns structured data
@@ -51,12 +98,26 @@ class ConversationAnalyzer:
         Args:
             transcript_text: The raw transcript text
             event_name: Optional name of the event (e.g., "JV Mastermind Dec 2025")
+            skip_if_processed: If True, skip analysis if transcript was already processed
 
         Returns:
             Dict with analysis results including speakers, topics, and signals
         """
         try:
             logger.info(f"Analyzing transcript (event: {event_name or 'unnamed'})")
+
+            # Check for duplicate transcript
+            if skip_if_processed:
+                dup_check = self.is_transcript_processed(transcript_text)
+                if dup_check["is_duplicate"]:
+                    logger.info(f"Transcript already processed: {dup_check['transcript_id']}")
+                    return {
+                        "success": True,
+                        "skipped": True,
+                        "reason": "already_processed",
+                        "transcript_id": dup_check["transcript_id"],
+                        "message": f"Transcript already processed on {dup_check.get('created_at', 'unknown date')}"
+                    }
 
             # Step 1: Detect transcript type
             transcript_type = self._detect_transcript_type(transcript_text)
@@ -128,7 +189,7 @@ class ConversationAnalyzer:
     ) -> Dict[str, Any]:
         """
         Use GPT to extract structured conversation data
-        Handles large transcripts by chunking
+        Handles large transcripts by chunking IN PARALLEL
 
         Args:
             transcript: The transcript text
@@ -143,25 +204,41 @@ class ConversationAnalyzer:
                 # Small transcript - process directly
                 return self._extract_signals_from_chunk(transcript, transcript_type)
 
-            # Large transcript - chunk and process
+            # Large transcript - chunk and process in parallel
             chunks = self._chunk_transcript(transcript)
-            logger.info(f"Split transcript into {len(chunks)} chunks for analysis")
+            total_chunks = len(chunks)
+            logger.info(f"Split transcript into {total_chunks} chunks (processing {MAX_PARALLEL_CHUNKS} in parallel)")
 
             all_speakers = []
             all_topics = []
             all_signals = []
             all_connections = []
+            completed = 0
 
-            for i, chunk in enumerate(chunks):
-                logger.info(f"Analyzing chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
-                result = self._extract_signals_from_chunk(chunk, transcript_type)
+            # Process chunks in parallel using ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=MAX_PARALLEL_CHUNKS) as executor:
+                # Submit all chunks for processing
+                future_to_chunk = {
+                    executor.submit(self._extract_signals_from_chunk, chunk, transcript_type): i
+                    for i, chunk in enumerate(chunks)
+                }
 
-                if result.get("success") and result.get("data"):
-                    data = result["data"]
-                    all_speakers.extend(data.get("speakers", []))
-                    all_topics.extend(data.get("topics", []))
-                    all_signals.extend(data.get("signals", []))
-                    all_connections.extend(data.get("connections", []))
+                # Collect results as they complete
+                for future in as_completed(future_to_chunk):
+                    chunk_idx = future_to_chunk[future]
+                    completed += 1
+
+                    try:
+                        result = future.result()
+                        if result.get("success") and result.get("data"):
+                            data = result["data"]
+                            all_speakers.extend(data.get("speakers", []))
+                            all_topics.extend(data.get("topics", []))
+                            all_signals.extend(data.get("signals", []))
+                            all_connections.extend(data.get("connections", []))
+                            logger.info(f"Chunk {chunk_idx+1} complete ({completed}/{total_chunks})")
+                    except Exception as e:
+                        logger.error(f"Chunk {chunk_idx+1} failed: {e}")
 
             # Merge and deduplicate results
             merged_data = {

@@ -7,8 +7,10 @@ import os
 import re
 import json
 import logging
+import hashlib
 from typing import Dict, Any, List, Optional
 from difflib import SequenceMatcher
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 from supabase_client import get_admin_client
 from directory_service import DirectoryService
@@ -18,7 +20,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Token/character limits for chunking
-MAX_CHUNK_CHARS = 12000  # ~3000 tokens, safe for gpt-5-nano
+MAX_CHUNK_CHARS = 24000  # ~6000 tokens - larger chunks = fewer API calls
+MAX_PARALLEL_CHUNKS = 4  # Process up to 4 chunks concurrently
 
 
 class AIProfileExtractor:
@@ -119,7 +122,7 @@ class AIProfileExtractor:
 
         This method:
         1. Splits large transcripts into chunks
-        2. Extracts profiles from each chunk
+        2. Extracts profiles from each chunk IN PARALLEL
         3. Merges and deduplicates results
 
         Args:
@@ -139,28 +142,41 @@ class AIProfileExtractor:
                     progress_callback(1, 1, "Processing transcript...")
                 return self._extract_multiple_profiles(transcript_text)
 
-            # Large transcript - chunk and process
+            # Large transcript - chunk and process in parallel
             chunks = self._chunk_transcript(transcript_text)
             total_chunks = len(chunks)
-            logger.info(f"Split transcript into {total_chunks} chunks")
+            logger.info(f"Split transcript into {total_chunks} chunks (processing {MAX_PARALLEL_CHUNKS} in parallel)")
 
             if progress_callback:
-                progress_callback(0, total_chunks, f"Split into {total_chunks} chunks, starting extraction...")
+                progress_callback(0, total_chunks, f"Split into {total_chunks} chunks, processing {MAX_PARALLEL_CHUNKS} in parallel...")
 
             all_profiles = []
+            completed = 0
 
-            for i, chunk in enumerate(chunks):
-                logger.info(f"Processing chunk {i+1}/{total_chunks} ({len(chunk)} chars)")
+            # Process chunks in parallel using ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=MAX_PARALLEL_CHUNKS) as executor:
+                # Submit all chunks for processing
+                future_to_chunk = {
+                    executor.submit(self._extract_multiple_profiles, chunk): i
+                    for i, chunk in enumerate(chunks)
+                }
 
-                if progress_callback:
-                    progress_callback(i, total_chunks, f"Extracting profiles from chunk {i+1}/{total_chunks}...")
+                # Collect results as they complete
+                for future in as_completed(future_to_chunk):
+                    chunk_idx = future_to_chunk[future]
+                    completed += 1
 
-                result = self._extract_multiple_profiles(chunk)
+                    try:
+                        result = future.result()
+                        if result.get("success") and result.get("profiles"):
+                            all_profiles.extend(result["profiles"])
+                            logger.info(f"Chunk {chunk_idx+1}: Found {len(result['profiles'])} profiles")
 
-                if result.get("success") and result.get("profiles"):
-                    all_profiles.extend(result["profiles"])
-                    if progress_callback:
-                        progress_callback(i + 1, total_chunks, f"Chunk {i+1}/{total_chunks}: Found {len(result['profiles'])} profiles (Total: {len(all_profiles)})")
+                        if progress_callback:
+                            progress_callback(completed, total_chunks,
+                                f"Completed {completed}/{total_chunks} chunks (Found {len(all_profiles)} profiles)")
+                    except Exception as e:
+                        logger.error(f"Chunk {chunk_idx+1} failed: {e}")
 
             # Deduplicate profiles by name similarity
             if progress_callback:

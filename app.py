@@ -892,7 +892,10 @@ def process_transcripts_with_database(uploaded_files, matches_per_person, save_t
                     event_name=event_name or transcript['filename']
                 )
 
-                if conv_result.get('success'):
+                if conv_result.get('skipped'):
+                    # Transcript was already processed
+                    st.info(f"Skipped {transcript['filename']}: {conv_result.get('message', 'already processed')}")
+                elif conv_result.get('success'):
                     conversation_results.append({
                         'filename': transcript['filename'],
                         'transcript_type': conv_result.get('transcript_type'),
