@@ -305,7 +305,7 @@ def show_main_app():
         st.markdown("---")
 
         # Navigation pages
-        pages = ["Dashboard", "Directory", "Search", "Process Transcripts", "My Matches", "My Preferences", "My Connections"]
+        pages = ["Dashboard", "Directory", "Process Transcripts", "My Matches", "My Preferences", "My Connections"]
         if is_admin:
             pages.append("Admin")
 
@@ -325,8 +325,6 @@ def show_main_app():
         show_dashboard()
     elif page == "Directory":
         show_directory()
-    elif page == "Search":
-        show_search()
     elif page == "Process Transcripts":
         show_process_transcripts()
     elif page == "My Matches":
@@ -468,10 +466,13 @@ def show_dashboard():
 # ==========================================
 
 def show_directory():
-    """Browse all profiles"""
+    """Browse and search all profiles"""
     st.markdown('<div class="main-header">Directory</div>', unsafe_allow_html=True)
 
     directory_service = DirectoryService(use_admin=True)
+
+    # Search box at the top
+    search_query = st.text_input("Search by name, company, business focus, or services...", key="dir_search")
 
     # Filters
     col1, col2, col3 = st.columns(3)
@@ -482,12 +483,18 @@ def show_directory():
     with col3:
         per_page = st.selectbox("Per Page", [25, 50, 100], index=0)
 
-    # Pagination state
+    # Pagination state - reset when search changes
     if "dir_page" not in st.session_state:
         st.session_state.dir_page = 0
+    if "last_search" not in st.session_state:
+        st.session_state.last_search = ""
+    if search_query != st.session_state.last_search:
+        st.session_state.dir_page = 0
+        st.session_state.last_search = search_query
 
     # Fetch profiles
     result = directory_service.get_profiles(
+        search=search_query,
         status=status_filter if status_filter != "All" else "",
         business_focus=focus_filter,
         limit=per_page,
@@ -501,13 +508,10 @@ def show_directory():
 
         st.markdown(f"**{total:,} profiles** | Page {st.session_state.dir_page + 1} of {total_pages}")
 
-        # Display as table
+        # Display profiles
         if profiles:
-            df = pd.DataFrame(profiles)[['name', 'company', 'business_focus', 'status', 'list_size', 'social_reach']]
-            df.columns = ['Name', 'Company', 'Business Focus', 'Status', 'List Size', 'Social Reach']
-            df['List Size'] = df['List Size'].fillna(0).astype(int).apply(lambda x: f"{x:,}")
-            df['Social Reach'] = df['Social Reach'].fillna(0).astype(int).apply(lambda x: f"{x:,}")
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            for profile in profiles:
+                display_profile_card(profile, directory_service)
 
         # Pagination
         col1, col2, col3 = st.columns([1, 2, 1])
@@ -523,31 +527,6 @@ def show_directory():
                     st.rerun()
     else:
         st.error("Failed to load profiles")
-
-# ==========================================
-# SEARCH
-# ==========================================
-
-def show_search():
-    """Search profiles"""
-    st.markdown('<div class="main-header">Search</div>', unsafe_allow_html=True)
-
-    query = st.text_input("Search by name, company, business focus, or services...", key="search_query")
-
-    if query and len(query) >= 2:
-        directory_service = DirectoryService(use_admin=True)
-        result = directory_service.get_profiles(search=query, limit=50)
-
-        if result["success"]:
-            profiles = result["data"]
-            st.markdown(f"**{len(profiles)} results**")
-
-            for profile in profiles:
-                display_profile_card(profile, directory_service)
-        else:
-            st.error("Search failed")
-    elif query:
-        st.info("Enter at least 2 characters")
 
 def display_profile_card(profile: dict, directory_service: DirectoryService):
     """Display a profile card with actions"""
