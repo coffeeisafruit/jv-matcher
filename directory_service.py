@@ -680,6 +680,49 @@ class DirectoryService:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    def regenerate_match_analysis(self, match_id: str) -> Dict[str, Any]:
+        """Regenerate rich analysis for a specific match using RichMatchService"""
+        try:
+            # Get the match with both profiles
+            response = self.client.table("match_suggestions") \
+                .select("*, profile:profile_id(*), suggested:suggested_profile_id(*)") \
+                .eq("id", match_id) \
+                .single() \
+                .execute()
+
+            match = response.data
+            if not match:
+                return {"success": False, "error": "Match not found"}
+
+            user_profile = match.get('profile', {})
+            match_profile = match.get('suggested', {})
+
+            if not user_profile or not match_profile:
+                return {"success": False, "error": "Could not load profiles for match"}
+
+            # Import and use RichMatchService
+            try:
+                from rich_match_service import RichMatchService
+                import os
+
+                rich_service = RichMatchService(os.getenv('OPENAI_API_KEY'))
+                result = rich_service.generate_rich_analysis(user_profile, match_profile)
+
+                if result.get('success') and result.get('analysis'):
+                    # Store the analysis
+                    update_result = self.update_match_rich_analysis(match_id, result['analysis'])
+                    return update_result
+                else:
+                    return {"success": False, "error": result.get('error', 'Failed to generate analysis')}
+
+            except ImportError:
+                return {"success": False, "error": "RichMatchService not available"}
+            except Exception as e:
+                return {"success": False, "error": f"Analysis generation failed: {str(e)}"}
+
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     # ==========================================
     # PROFILE REVIEW QUEUE
     # ==========================================

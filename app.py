@@ -848,21 +848,58 @@ def show_matches():
         if st.button("Generate My Report", type="primary", help="Generate PDF report of all matches"):
             with st.spinner("Generating report..."):
                 try:
-                    # Get all matches
-                    matches = directory_service.get_match_suggestions(user_profile['id'], status=None)
+                    # Get all matches with rich analysis
+                    matches = directory_service.get_matches_with_rich_analysis(user_profile['id'])
+
+                    # Prepare data for PDF generator
+                    report_data = {
+                        "participant": user_profile.get('name', 'Unknown'),
+                        "date": datetime.now().strftime("%B %d, %Y at %I:%M %p"),
+                        "profile": {
+                            "what_you_do": user_profile.get('what_you_do') or user_profile.get('business_focus', ''),
+                            "who_you_serve": user_profile.get('who_you_serve', ''),
+                            "seeking": user_profile.get('seeking', ''),
+                            "offering": user_profile.get('offering') or user_profile.get('service_provided', ''),
+                            "current_projects": user_profile.get('current_projects', '')
+                        },
+                        "matches": []
+                    }
+
+                    # Transform matches to PDF format
+                    for m in matches:
+                        suggested = m.get('suggested', {})
+                        rich = m.get('rich_analysis') or {}
+                        if isinstance(rich, str):
+                            try:
+                                rich = json.loads(rich)
+                            except:
+                                rich = {}
+
+                        report_data["matches"].append({
+                            "name": suggested.get('name', 'Unknown'),
+                            "company": suggested.get('company', ''),
+                            "score": m.get('match_score', 0),
+                            "type": rich.get('match_type', 'Partnership'),
+                            "fit": rich.get('fit', m.get('match_reason', '')),
+                            "opportunity": rich.get('opportunity', ''),
+                            "benefits": rich.get('benefits', ''),
+                            "revenue": rich.get('revenue_estimate', ''),
+                            "timing": rich.get('timing', ''),
+                            "message": rich.get('outreach_message', ''),
+                            "contact": suggested.get('email', '')
+                        })
 
                     # Generate PDF
                     pdf_gen = PDFGenerator()
-                    pdf_path = pdf_gen.generate_user_report(user_profile, matches)
+                    pdf_bytes = pdf_gen.generate_to_bytes(report_data)
 
                     # Offer download
-                    with open(pdf_path, 'rb') as f:
-                        st.download_button(
-                            label="Download Report PDF",
-                            data=f.read(),
-                            file_name=f"jv_matches_{user_profile.get('name', 'user')}.pdf",
-                            mime="application/pdf"
-                        )
+                    st.download_button(
+                        label="Download Report PDF",
+                        data=pdf_bytes,
+                        file_name=f"jv_matches_{user_profile.get('name', 'user').replace(' ', '_')}.pdf",
+                        mime="application/pdf"
+                    )
                     st.success("Report generated successfully!")
                 except Exception as e:
                     st.error(f"Error generating report: {str(e)}")
@@ -1484,7 +1521,13 @@ def show_analytics():
 
     try:
         # Fetch analytics data
-        analytics = directory_service.get_analytics()
+        result = directory_service.get_analytics_summary()
+
+        if not result.get('success'):
+            st.error(f"Failed to load analytics: {result.get('error', 'Unknown error')}")
+            return
+
+        analytics = result.get('data', {})
 
         # Display metrics in columns
         col1, col2, col3, col4, col5 = st.columns(5)
@@ -1496,20 +1539,18 @@ def show_analytics():
             st.metric("Emails Sent", analytics.get('emails_sent', 0))
 
         with col3:
-            st.metric("Contacted", analytics.get('contacted', 0))
+            st.metric("Contacted", analytics.get('contacted_count', 0))
 
         with col4:
-            st.metric("Connected", analytics.get('connected', 0))
+            st.metric("Connected", analytics.get('connected_count', 0))
 
         with col5:
             st.metric("Positive Feedback", analytics.get('positive_feedback', 0))
 
         st.markdown("---")
 
-        # Additional analytics
-        if analytics.get('match_stats'):
-            st.markdown("### Match Statistics")
-            st.json(analytics['match_stats'])
+        # Show negative feedback too
+        st.metric("Negative Feedback", analytics.get('negative_feedback', 0))
 
     except Exception as e:
         st.error(f"Error loading analytics: {str(e)}")
