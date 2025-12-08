@@ -792,6 +792,39 @@ def show_matches():
 
     directory_service = DirectoryService(use_admin=True)
 
+    # Show success message if matches were just refreshed
+    if st.session_state.get('matches_refreshed'):
+        st.success(f"Matches refreshed! Found {st.session_state.get('matches_count', 0)} new matches.")
+        del st.session_state['matches_refreshed']
+        if 'matches_count' in st.session_state:
+            del st.session_state['matches_count']
+
+    # Refresh matches button
+    col_refresh, col_spacer = st.columns([1, 3])
+    with col_refresh:
+        if st.button("Refresh My Matches", type="secondary", help="Regenerate matches based on your current profile"):
+            with st.spinner("Finding your best matches..."):
+                try:
+                    # Use hybrid matcher if OpenAI key available
+                    import os
+                    if os.getenv("OPENAI_API_KEY"):
+                        generator = HybridMatchGenerator()
+                    else:
+                        generator = MatchGenerator()
+
+                    result = generator.generate_matches_for_user(user_profile['id'], top_n=10)
+
+                    if result.get('success'):
+                        st.session_state['matches_refreshed'] = True
+                        st.session_state['matches_count'] = result.get('matches_created', 0)
+                        st.rerun()
+                    else:
+                        st.error(f"Error: {result.get('error', 'Unknown error')}")
+                except Exception as e:
+                    st.error(f"Error refreshing matches: {str(e)}")
+
+    st.markdown("---")
+
     # Filters
     col1, col2, col3 = st.columns(3)
 
