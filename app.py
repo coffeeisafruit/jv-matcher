@@ -1011,10 +1011,8 @@ def show_preferences():
         if st.button("Save Preferences", type="primary", use_container_width=True):
             result = directory_service.update_profile_preferences(
                 user_profile['id'],
-                {
-                    'preferred_categories': selected_categories,
-                    'preferred_partnership_types': selected_partnership_types
-                }
+                selected_categories,
+                selected_partnership_types
             )
 
             if result.get('success'):
