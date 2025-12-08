@@ -332,15 +332,14 @@ class AIProfileExtractor:
         try:
             logger.info(f"Adding to review queue: {extracted_data.get('name')}")
 
+            # Match columns to the profile_review_queue table schema
             review_data = {
-                "extracted_data": json.dumps(extracted_data),
-                "match_result": json.dumps(match_result),
-                "transcript_text": transcript_text[:5000] if transcript_text else None,  # Limit size
-                "confidence": match_result.get("confidence", 0.0),
-                "suggested_profile_id": match_result.get("profile_id"),
+                "extracted_name": extracted_data.get("name", "Unknown"),
+                "extracted_data": extracted_data,  # JSONB column
+                "candidate_profile_id": match_result.get("profile_id"),
+                "confidence_score": match_result.get("confidence", 0.0),
                 "status": "pending",
-                "notes": notes,
-                "created_at": "now()"
+                "source_transcript": transcript_text[:5000] if transcript_text else None,
             }
 
             response = self.supabase.table("profile_review_queue").insert(review_data).execute()

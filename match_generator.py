@@ -981,8 +981,210 @@ class HybridMatchGenerator:
         }
 
 
-def get_matcher(use_ai: bool = False, use_hybrid: bool = False, api_key: Optional[str] = None):
+class ConversationAwareMatchGenerator(HybridMatchGenerator):
+    """
+    Enhanced matcher that incorporates conversation signals from networking events.
+
+    New weights:
+    - Semantic similarity: 30% (was 35%)
+    - Category overlap: 25% (was 30%)
+    - Keyword overlap: 15% (was 20%)
+    - Reach compatibility: 10% (was 15%)
+    - Conversation signals: 20% (NEW)
+    """
+
+    WEIGHTS = {
+        'semantic': 0.30,
+        'category': 0.25,
+        'keyword': 0.15,
+        'reach': 0.10,
+        'conversation': 0.20
+    }
+
+    def __init__(self, openai_api_key: Optional[str] = None):
+        super().__init__(openai_api_key)
+        self.conversation_analyzer = None
+        try:
+            from conversation_analyzer import ConversationAnalyzer
+            self.conversation_analyzer = ConversationAnalyzer(openai_api_key)
+            print("ConversationAwareMatchGenerator initialized with conversation analysis")
+        except Exception as e:
+            print(f"Conversation analyzer not available: {e}")
+
+    def calculate_conversation_score(
+        self,
+        target_profile_id: str,
+        candidate_profile_id: str
+    ) -> float:
+        """
+        Calculate conversation-based matching score.
+
+        Score components:
+        1. +40 pts: Candidate expressed interest in target's offerings
+        2. +30 pts: Target's needs match candidate's offers
+        3. +20 pts: Shared conversation topics
+        4. +10 pts: Were in the same conversation (already met)
+        """
+        if not self.conversation_analyzer:
+            return 50.0  # Neutral if no conversation data
+
+        score = 0.0
+
+        try:
+            supabase = self.conversation_analyzer.supabase
+
+            # 1. Check if candidate expressed connection interest in target
+            connection_signals = supabase.table("conversation_signals") \
+                .select("*") \
+                .eq("profile_id", candidate_profile_id) \
+                .eq("target_profile_id", target_profile_id) \
+                .eq("signal_type", "connection") \
+                .execute()
+
+            if connection_signals.data:
+                score += 40.0
+
+            # 2. Check if target's needs match candidate's offers
+            target_needs = supabase.table("conversation_signals") \
+                .select("signal_text") \
+                .eq("profile_id", target_profile_id) \
+                .eq("signal_type", "need") \
+                .execute()
+
+            candidate_offers = supabase.table("conversation_signals") \
+                .select("signal_text") \
+                .eq("profile_id", candidate_profile_id) \
+                .eq("signal_type", "offer") \
+                .execute()
+
+            if target_needs.data and candidate_offers.data:
+                # Simple keyword overlap check
+                need_keywords = set()
+                for need in target_needs.data:
+                    words = need.get("signal_text", "").lower().split()
+                    need_keywords.update(w for w in words if len(w) > 3)
+
+                offer_keywords = set()
+                for offer in candidate_offers.data:
+                    words = offer.get("signal_text", "").lower().split()
+                    offer_keywords.update(w for w in words if len(w) > 3)
+
+                overlap = len(need_keywords & offer_keywords)
+                if overlap > 0:
+                    score += min(30.0, overlap * 10)
+
+            # 3. Check shared topics
+            shared_topics = self.conversation_analyzer.get_shared_topics(
+                target_profile_id, candidate_profile_id
+            )
+            if shared_topics:
+                score += min(20.0, len(shared_topics) * 5)
+
+            # 4. Check if they were in the same conversation
+            if self.conversation_analyzer.were_in_same_conversation(
+                target_profile_id, candidate_profile_id
+            ):
+                score += 10.0
+
+        except Exception as e:
+            print(f"Error calculating conversation score: {e}")
+            return 50.0  # Neutral on error
+
+        return min(100.0, score)
+
+    def calculate_hybrid_score(
+        self,
+        target_profile: Dict,
+        candidate_profile: Dict,
+        target_embedding: Optional[List[float]] = None,
+        candidate_embedding: Optional[List[float]] = None
+    ) -> Tuple[float, Dict[str, float], List[str], str]:
+        """
+        Extended hybrid score including conversation signals.
+        Returns: (total_score, component_scores, common_keywords, collaboration_idea)
+        """
+        component_scores = {}
+
+        # 1. Get base component scores from parent logic
+        # Keyword-based scores
+        target_text = ' '.join(filter(None, [
+            target_profile.get('business_focus', ''),
+            target_profile.get('service_provided', ''),
+            target_profile.get('company', '')
+        ]))
+        target_keywords = self.keyword_matcher.extract_keywords(target_text)
+        target_categories = self.keyword_matcher.get_categories(target_keywords)
+
+        candidate_text = ' '.join(filter(None, [
+            candidate_profile.get('business_focus', ''),
+            candidate_profile.get('service_provided', ''),
+            candidate_profile.get('company', '')
+        ]))
+        candidate_keywords = self.keyword_matcher.extract_keywords(candidate_text)
+        candidate_categories = self.keyword_matcher.get_categories(candidate_keywords)
+
+        # Keyword overlap score
+        common_keywords = target_keywords.intersection(candidate_keywords)
+        if target_keywords or candidate_keywords:
+            keyword_score = len(common_keywords) / max(len(target_keywords | candidate_keywords), 1) * 100
+        else:
+            keyword_score = 0.0
+        component_scores['keyword'] = keyword_score
+
+        # Category overlap score
+        common_categories = target_categories.intersection(candidate_categories)
+        if target_categories or candidate_categories:
+            category_score = len(common_categories) / max(len(target_categories | candidate_categories), 1) * 100
+        else:
+            category_score = 0.0
+        component_scores['category'] = category_score
+
+        # Semantic similarity
+        if self.embedding_service and target_embedding and candidate_embedding:
+            semantic_sim = self.embedding_service.cosine_similarity(target_embedding, candidate_embedding)
+            semantic_score = max(0.0, semantic_sim * 100)
+        else:
+            semantic_score = (keyword_score + category_score) / 2
+        component_scores['semantic'] = semantic_score
+
+        # Reach compatibility
+        target_reach = target_profile.get('social_reach', 0) or 0
+        candidate_reach = candidate_profile.get('social_reach', 0) or 0
+        reach_score = self.calculate_reach_compatibility(target_reach, candidate_reach)
+        component_scores['reach'] = reach_score
+
+        # 2. NEW: Conversation score
+        conversation_score = self.calculate_conversation_score(
+            target_profile.get('id'),
+            candidate_profile.get('id')
+        )
+        component_scores['conversation'] = conversation_score
+
+        # 3. Calculate weighted total with new weights
+        total_score = (
+            component_scores['semantic'] * self.WEIGHTS['semantic'] +
+            component_scores['category'] * self.WEIGHTS['category'] +
+            component_scores['keyword'] * self.WEIGHTS['keyword'] +
+            component_scores['reach'] * self.WEIGHTS['reach'] +
+            component_scores['conversation'] * self.WEIGHTS['conversation']
+        )
+
+        # Generate collaboration idea
+        collaboration_idea = self.keyword_matcher.generate_collaboration_idea(
+            target_categories, candidate_categories
+        )
+
+        # Enhance collaboration idea if high conversation score
+        if conversation_score > 60:
+            collaboration_idea = f"[Strong conversation signal] {collaboration_idea}"
+
+        return round(total_score, 1), component_scores, list(common_keywords)[:5], collaboration_idea
+
+
+def get_matcher(use_ai: bool = False, use_hybrid: bool = False, use_conversation: bool = False, api_key: Optional[str] = None):
     """Factory function to get appropriate matcher"""
+    if use_conversation:
+        return ConversationAwareMatchGenerator(api_key)
     if use_hybrid:
         return HybridMatchGenerator(api_key)
     if use_ai:

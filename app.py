@@ -23,12 +23,15 @@ from services.pdf_generator import PDFGenerator
 try:
     from auth_service import AuthService, init_session_state
     from directory_service import DirectoryService
-    from match_generator import MatchGenerator, AIMatchGenerator, HybridMatchGenerator
+    from match_generator import MatchGenerator, AIMatchGenerator, HybridMatchGenerator, ConversationAwareMatchGenerator
+    from profile_extractor import AIProfileExtractor
+    from conversation_analyzer import ConversationAnalyzer
     SUPABASE_AVAILABLE = True
 except ImportError:
     SUPABASE_AVAILABLE = False
 
 from jv_matcher import JVMatcher
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Page configuration
 st.set_page_config(
@@ -307,9 +310,11 @@ def show_main_app():
 
         st.markdown("---")
 
-        # Navigation pages
-        pages = ["Dashboard", "Directory", "Process Transcripts", "My Matches", "My Preferences", "My Connections"]
+        # Navigation pages - regular users
+        pages = ["Dashboard", "Directory", "My Matches", "My Preferences", "My Connections"]
         if is_admin:
+            # Admin gets Process Transcripts and Admin panel
+            pages.insert(2, "Process Transcripts")
             pages.append("Admin")
 
         page = st.radio("Navigation", pages, label_visibility="collapsed")
@@ -643,15 +648,22 @@ def show_process_transcripts():
 
     st.markdown("""
     <div class="info-box">
-        <strong>Upload meeting transcripts to:</strong><br>
+        <strong>Upload networking event transcripts to:</strong><br>
         1. Extract participant profiles automatically<br>
-        2. Find ideal JV partners for each person<br>
-        3. Save profiles to the directory (optional)<br>
-        4. Generate personalized reports
+        2. Analyze conversation topics and connection signals<br>
+        3. Find ideal JV partners using conversation intelligence<br>
+        4. Save profiles and signals to the directory
     </div>
     """, unsafe_allow_html=True)
 
     st.markdown("")
+
+    # Event name input
+    event_name = st.text_input(
+        "Event Name (optional)",
+        placeholder="e.g., JV Mastermind December 2025",
+        help="Name of the networking event for tracking"
+    )
 
     # File uploader
     uploaded_files = st.file_uploader(
@@ -691,131 +703,326 @@ def show_process_transcripts():
         # Process button
         st.markdown("")
         if st.button("Process Files", type="primary", use_container_width=True):
-            process_transcripts_with_database(uploaded_files, matches_per_person, save_to_database)
+            process_transcripts_with_database(uploaded_files, matches_per_person, save_to_database, event_name)
 
     else:
         st.info("Upload one or more transcript files to get started")
 
-def process_transcripts_with_database(uploaded_files, matches_per_person, save_to_database):
-    """Process transcripts and optionally save to database"""
+def process_transcripts_with_database(uploaded_files, matches_per_person, save_to_database, event_name=None):
+    """Process transcripts using AI-powered extraction with conversation analysis"""
     progress_bar = st.progress(0)
     status_text = st.empty()
+    results_container = st.empty()
 
     try:
-        # Save uploaded files to temporary directory
-        temp_dir = tempfile.mkdtemp()
-        file_paths = []
+        # Initialize services
+        status_text.text("Initializing AI services...")
+        progress_bar.progress(5)
 
-        status_text.text("Saving uploaded files...")
+        directory_service = DirectoryService(use_admin=True)
+        profile_extractor = AIProfileExtractor()
+        conversation_analyzer = ConversationAnalyzer()
+        match_generator = ConversationAwareMatchGenerator()  # Use conversation-aware matcher
+
+        # Read transcript content from uploaded files
+        status_text.text("Reading transcript files...")
         progress_bar.progress(10)
 
+        transcripts = []
         for uploaded_file in uploaded_files:
-            file_path = os.path.join(temp_dir, uploaded_file.name)
-            with open(file_path, 'wb') as f:
-                f.write(uploaded_file.getbuffer())
-            file_paths.append(file_path)
+            content = uploaded_file.read().decode('utf-8', errors='ignore')
+            transcripts.append({
+                'filename': uploaded_file.name,
+                'content': content
+            })
 
-        status_text.text("Extracting profiles from transcripts...")
-        progress_bar.progress(30)
+        # Process each transcript with AI
+        extracted_profiles = []
+        profiles_created = 0
+        profiles_updated = 0
+        profiles_queued = 0
+        matches_generated = 0
 
-        # Initialize matcher
-        matcher = JVMatcher(output_dir="outputs")
+        total_transcripts = len(transcripts)
 
-        # Extract profiles first
-        all_profiles = []
-        for file_path in file_paths:
-            profiles = matcher.extract_profiles_from_transcript(file_path)
-            all_profiles.extend(profiles)
+        for i, transcript in enumerate(transcripts):
+            progress_pct = 15 + int((i / total_transcripts) * 50)
+            status_text.text(f"AI extracting profile from {transcript['filename']}...")
+            progress_bar.progress(progress_pct)
 
-        status_text.text(f"Found {len(all_profiles)} profiles. Processing...")
-        progress_bar.progress(40)
+            # Use AI to extract structured profile data
+            extraction_result = profile_extractor.extract_profile_from_transcript(transcript['content'])
 
-        # Save to database if requested
-        profiles_saved = 0
-        if save_to_database and SUPABASE_AVAILABLE:
-            status_text.text("Saving profiles to directory...")
-            progress_bar.progress(50)
+            if not extraction_result.get('success'):
+                st.warning(f"Could not extract profile from {transcript['filename']}: {extraction_result.get('error', 'Unknown error')}")
+                continue
 
-            directory_service = DirectoryService(use_admin=True)
+            extracted_data = extraction_result.get('data', {})
+            extraction_confidence = extraction_result.get('confidence', 0)
 
-            for profile in all_profiles:
-                # Check if profile already exists
-                existing = directory_service.get_profiles(search=profile.get('name', ''), limit=1)
+            # Skip if no valid name extracted
+            if not extracted_data.get('name') or extracted_data.get('name').lower() in ['unknown', 'participant', 'mobile', 'email', 'introducing']:
+                st.warning(f"No valid profile name found in {transcript['filename']}")
+                continue
 
-                if not existing.get('data'):
-                    # Extract keywords from content if available
-                    content = profile.get('content', profile.get('summary', ''))
-                    keywords = matcher._extract_keywords(content)[:5] if content else []
+            extracted_profiles.append({
+                'filename': transcript['filename'],
+                'data': extracted_data,
+                'confidence': extraction_confidence
+            })
 
-                    # Create new profile
-                    result = directory_service.create_profile({
-                        'name': profile.get('name', 'Unknown'),
-                        'status': 'Pending',
-                        'business_focus': ', '.join(keywords) if keywords else None,
-                        'source': 'transcript_extraction'
-                    })
+            # Save to database if requested
+            if save_to_database and SUPABASE_AVAILABLE:
+                # Use confidence-based matching to find existing profile
+                match_result = profile_extractor.find_matching_profile(extracted_data)
+
+                action = match_result.get('action', 'review')
+                profile_id = match_result.get('profile_id')
+                match_confidence = match_result.get('confidence', 0)
+
+                if action == 'update' and profile_id:
+                    # Update existing profile with new rich data
+                    update_data = {
+                        'what_you_do': extracted_data.get('what_you_do'),
+                        'who_you_serve': extracted_data.get('who_you_serve'),
+                        'seeking': extracted_data.get('seeking'),
+                        'offering': extracted_data.get('offering'),
+                        'current_projects': extracted_data.get('current_projects'),
+                        'business_focus': extracted_data.get('business_focus'),
+                    }
+                    # Only update fields that have values
+                    update_data = {k: v for k, v in update_data.items() if v}
+
+                    if update_data:
+                        result = directory_service.update_profile(profile_id, update_data)
+                        if result.get('success'):
+                            profiles_updated += 1
+
+                elif action == 'create':
+                    # Create new profile with all extracted data
+                    create_data = {
+                        'name': extracted_data.get('name'),
+                        'email': extracted_data.get('email'),
+                        'company': extracted_data.get('company'),
+                        'business_focus': extracted_data.get('business_focus'),
+                        'what_you_do': extracted_data.get('what_you_do'),
+                        'who_you_serve': extracted_data.get('who_you_serve'),
+                        'seeking': extracted_data.get('seeking'),
+                        'offering': extracted_data.get('offering'),
+                        'current_projects': extracted_data.get('current_projects'),
+                        'list_size': extracted_data.get('list_size', 0),
+                        'social_reach': extracted_data.get('social_reach', 0),
+                        'status': 'Active',
+                    }
+                    # Remove None values
+                    create_data = {k: v for k, v in create_data.items() if v is not None}
+
+                    result = directory_service.create_profile(create_data)
                     if result.get('success'):
-                        profiles_saved += 1
+                        profiles_created += 1
+                        profile_id = result.get('data', {}).get('id')
 
-        status_text.text("Finding JV partner matches...")
-        progress_bar.progress(60)
+                elif action == 'review':
+                    # Queue for manual review
+                    profile_extractor.queue_for_review(
+                        extracted_data,
+                        match_result,
+                        transcript['content'][:5000],
+                        notes=f"From file: {transcript['filename']}"
+                    )
+                    profiles_queued += 1
 
-        # Process files with matcher
-        results = matcher.process_files(file_paths, matches_per_person=matches_per_person)
+                # Generate matches for new/updated profiles
+                if profile_id and action in ['create', 'update']:
+                    status_text.text(f"Generating matches for {extracted_data.get('name')}...")
+                    try:
+                        match_result = match_generator.generate_matches_for_user(
+                            profile_id,
+                            top_n=matches_per_person,
+                            generate_rich_analysis=True
+                        )
+                        if match_result.get('success'):
+                            matches_generated += len(match_result.get('matches', []))
+                    except Exception as match_error:
+                        st.warning(f"Could not generate matches for {extracted_data.get('name')}: {str(match_error)}")
 
-        status_text.text("Generating reports...")
-        progress_bar.progress(80)
+        # Run conversation analysis on each transcript
+        conversation_results = []
+        total_topics = 0
+        total_signals = 0
 
-        status_text.text("Processing complete!")
-        progress_bar.progress(100)
+        status_text.text("Analyzing conversation signals...")
+        progress_bar.progress(70)
+
+        for i, transcript in enumerate(transcripts):
+            progress_pct = 70 + int((i / total_transcripts) * 15)
+            status_text.text(f"Extracting conversation signals from {transcript['filename']}...")
+            progress_bar.progress(progress_pct)
+
+            try:
+                conv_result = conversation_analyzer.analyze_transcript(
+                    transcript['content'],
+                    event_name=event_name or transcript['filename']
+                )
+
+                if conv_result.get('success'):
+                    conversation_results.append({
+                        'filename': transcript['filename'],
+                        'transcript_type': conv_result.get('transcript_type'),
+                        'speakers': conv_result.get('speakers_count', 0),
+                        'topics': conv_result.get('topics_count', 0),
+                        'signals': conv_result.get('signals_count', 0),
+                        'data': conv_result.get('data', {})
+                    })
+                    total_topics += conv_result.get('topics_count', 0)
+                    total_signals += conv_result.get('signals_count', 0)
+            except Exception as conv_error:
+                st.warning(f"Could not analyze conversation in {transcript['filename']}: {str(conv_error)}")
+
+        progress_bar.progress(85)
+
+        # After adding new profiles, regenerate matches for ALL existing users
+        if profiles_created > 0 or profiles_updated > 0:
+            status_text.text("Regenerating matches for all users with conversation intelligence...")
+            progress_bar.progress(87)
+
+            # Get all existing profiles to regenerate their matches
+            all_profiles_result = directory_service.get_profiles(limit=500)
+            if all_profiles_result.get('success'):
+                all_user_profiles = all_profiles_result.get('data', [])
+                total_users = len(all_user_profiles)
+                users_updated = 0
+
+                for idx, user_profile in enumerate(all_user_profiles):
+                    user_id = user_profile.get('id')
+                    if user_id:
+                        try:
+                            # Regenerate matches for this user (they'll now see the new profiles)
+                            match_generator.generate_matches_for_user(
+                                user_id,
+                                top_n=matches_per_person,
+                                generate_rich_analysis=True
+                            )
+                            users_updated += 1
+                            # Update progress
+                            progress_pct = 92 + int((idx / total_users) * 6)
+                            status_text.text(f"Updating matches: {users_updated}/{total_users} users...")
+                            progress_bar.progress(min(progress_pct, 98))
+                        except Exception as user_match_error:
+                            pass  # Skip errors for individual users
+
+                matches_generated += users_updated * matches_per_person  # Approximate
+
+        progress_bar.progress(99)
+        status_text.text("Finalizing...")
 
         # Show results
+        progress_bar.progress(100)
+        status_text.text("Complete!")
+
         st.markdown("""
         <div class="success-box">
-            <h3>Processing Complete!</h3>
+            <h3>✅ AI Processing Complete!</h3>
         </div>
         """, unsafe_allow_html=True)
 
-        col1, col2, col3 = st.columns(3)
+        # Summary metrics - Row 1
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("Profiles Extracted", results['total_profiles'])
+            st.metric("Profiles Extracted", len(extracted_profiles))
         with col2:
-            st.metric("Reports Generated", results['total_reports'])
+            st.metric("New Profiles Created", profiles_created)
         with col3:
-            st.metric("Saved to Directory", profiles_saved)
+            st.metric("Profiles Updated", profiles_updated)
+        with col4:
+            st.metric("Matches Generated", matches_generated)
 
-        # Download ZIP
-        if os.path.exists(results['zip_path']):
-            with open(results['zip_path'], 'rb') as f:
-                st.download_button(
-                    label="Download All Reports (ZIP)",
-                    data=f.read(),
-                    file_name=os.path.basename(results['zip_path']),
-                    mime="application/zip",
-                    use_container_width=True
-                )
+        # Summary metrics - Row 2 (Conversation Analysis)
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Topics Extracted", total_topics)
+        with col2:
+            st.metric("Signals Detected", total_signals)
+        with col3:
+            st.metric("Conversations Analyzed", len(conversation_results))
+        with col4:
+            if profiles_queued > 0:
+                st.metric("Pending Review", profiles_queued)
 
-        # Show individual reports
-        st.markdown("### Generated Reports")
-        for i, report_path in enumerate(results['reports'], 1):
-            report_name = os.path.basename(report_path)
-            if os.path.exists(report_path):
-                with open(report_path, 'r', encoding='utf-8') as f:
-                    report_content = f.read()
+        if profiles_queued > 0:
+            st.info(f"📋 {profiles_queued} profile(s) queued for manual review (check Admin panel)")
 
-                with st.expander(f"{report_name}"):
-                    st.markdown(report_content)
+        # Show extracted profiles
+        if extracted_profiles:
+            st.markdown("### Extracted Profiles")
+            for profile in extracted_profiles:
+                data = profile['data']
+                with st.expander(f"**{data.get('name', 'Unknown')}** - {profile['filename']} ({profile['confidence']:.0f}% confidence)"):
+                    col1, col2 = st.columns(2)
 
-                    st.download_button(
-                        label=f"Download {report_name}",
-                        data=report_content,
-                        file_name=report_name,
-                        mime="text/markdown",
-                        key=f"download_{i}"
-                    )
+                    with col1:
+                        if data.get('company'):
+                            st.markdown(f"**Company:** {data['company']}")
+                        if data.get('email'):
+                            st.markdown(f"**Email:** {data['email']}")
+                        if data.get('business_focus'):
+                            st.markdown(f"**Business Focus:** {data['business_focus']}")
+                        if data.get('what_you_do'):
+                            st.markdown(f"**What They Do:** {data['what_you_do']}")
+
+                    with col2:
+                        if data.get('who_you_serve'):
+                            st.markdown(f"**Who They Serve:** {data['who_you_serve']}")
+                        if data.get('seeking'):
+                            st.markdown(f"**Seeking:** {data['seeking']}")
+                        if data.get('offering'):
+                            st.markdown(f"**Offering:** {data['offering']}")
+                        if data.get('current_projects'):
+                            st.markdown(f"**Current Projects:** {data['current_projects']}")
+
+        # Show conversation insights
+        if conversation_results:
+            st.markdown("### Conversation Insights")
+            for conv in conversation_results:
+                conv_data = conv.get('data', {})
+                with st.expander(f"**{conv['filename']}** - {conv['transcript_type']} ({conv['speakers']} speakers, {conv['topics']} topics, {conv['signals']} signals)"):
+                    # Show topics
+                    topics = conv_data.get('topics', [])
+                    if topics:
+                        st.markdown("**Topics Discussed:**")
+                        topic_tags = " ".join([f"`{t.get('topic_name', '')}`" for t in topics[:10]])
+                        st.markdown(topic_tags)
+
+                    # Show signals
+                    signals = conv_data.get('signals', [])
+                    if signals:
+                        st.markdown("**Key Signals:**")
+                        for signal in signals[:5]:
+                            signal_type = signal.get('signal_type', 'unknown')
+                            speaker = signal.get('speaker_name', 'Unknown')
+                            text = signal.get('signal_text', '')
+                            if signal_type == 'need':
+                                st.markdown(f"- 🔍 **{speaker}** needs: {text}")
+                            elif signal_type == 'offer':
+                                st.markdown(f"- 💡 **{speaker}** offers: {text}")
+                            elif signal_type == 'connection':
+                                target = signal.get('target_speaker', '')
+                                st.markdown(f"- 🤝 **{speaker}** → **{target}**: {text}")
+                            else:
+                                st.markdown(f"- ℹ️ **{speaker}**: {text}")
+
+        # Next steps
+        if profiles_created > 0 or profiles_updated > 0 or total_signals > 0:
+            st.markdown("### Next Steps")
+            st.markdown("1. Go to **My Matches** to see AI-generated match recommendations")
+            st.markdown("2. Matches now include **conversation signals** for better partner suggestions")
+            st.markdown("3. Review match analysis and use the Send Email button to connect")
+            st.markdown("4. Generate a PDF report from the My Matches page")
 
     except Exception as e:
         st.error(f"Error processing files: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc())
         progress_bar.empty()
         status_text.empty()
 
