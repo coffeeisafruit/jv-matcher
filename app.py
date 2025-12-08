@@ -412,6 +412,11 @@ def show_dashboard():
         st.markdown("### Edit Your Profile")
         st.caption("Update your profile to get better match suggestions")
 
+        # Show success message if profile was just updated
+        if st.session_state.get('profile_updated'):
+            st.success("Profile updated successfully!")
+            del st.session_state['profile_updated']
+
         with st.form("edit_profile_form"):
             col1, col2 = st.columns(2)
 
@@ -434,23 +439,29 @@ def show_dashboard():
                 social_reach = st.number_input("Social Media Reach", value=user_profile.get('social_reach', 0) or 0, min_value=0)
 
             if st.form_submit_button("Save Profile", type="primary", use_container_width=True):
-                update_data = {
-                    "name": name,
-                    "company": company if company else None,
-                    "business_focus": business_focus if business_focus else None,
-                    "service_provided": service_provided if service_provided else None,
-                    "list_size": list_size,
-                    "social_reach": social_reach
-                }
-
-                result = directory_service.update_profile(user_profile['id'], update_data)
-                if result.get('success'):
-                    st.success("Profile updated!")
-                    # Update session state
-                    st.session_state.user_profile.update(update_data)
-                    st.rerun()
+                if not user_profile.get('id'):
+                    st.error("Profile not found. Please log out and log back in.")
                 else:
-                    st.error(f"Error updating profile: {result.get('error')}")
+                    try:
+                        update_data = {
+                            "name": name,
+                            "company": company if company else None,
+                            "business_focus": business_focus if business_focus else None,
+                            "service_provided": service_provided if service_provided else None,
+                            "list_size": list_size,
+                            "social_reach": social_reach
+                        }
+
+                        result = directory_service.update_profile(user_profile['id'], update_data)
+                        if result.get('success'):
+                            # Update session state
+                            st.session_state.user_profile.update(update_data)
+                            st.session_state['profile_updated'] = True
+                            st.rerun()
+                        else:
+                            st.error(f"Error updating profile: {result.get('error')}")
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
 
 # ==========================================
 # DIRECTORY BROWSER
