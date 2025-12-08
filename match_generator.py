@@ -817,6 +817,13 @@ class HybridMatchGenerator:
         only_registered: bool = False
     ) -> Dict:
         """Generate hybrid matches for all profiles"""
+        # Auto-generate embeddings for profiles that don't have them
+        if self.embedding_service:
+            print("Checking for profiles needing embeddings...")
+            embed_result = self.generate_all_embeddings(batch_size=50)
+            if embed_result.get('profiles_updated', 0) > 0:
+                print(f"Generated embeddings for {embed_result['profiles_updated']} profiles")
+
         # Get all profiles with embeddings
         all_profiles = self.directory_service.get_all_profiles_for_matching()
         if not all_profiles:
