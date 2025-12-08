@@ -279,14 +279,14 @@ class ConversationAnalyzer:
         unique = []
 
         for speaker in speakers:
-            name = speaker.get("name", "").strip()
+            name = (speaker.get("name") or "").strip()
             if not name:
                 continue
 
             # Check if this speaker matches any existing unique speaker
             found_match = False
             for existing in unique:
-                existing_name = existing.get("name", "").strip()
+                existing_name = (existing.get("name") or "").strip()
                 similarity = self._name_similarity(name, existing_name)
 
                 if similarity >= 0.85:
@@ -335,14 +335,14 @@ class ConversationAnalyzer:
         unique = []
 
         for topic in topics:
-            name = topic.get("topic_name", "").strip().lower()
+            name = (topic.get("topic_name") or "").strip().lower()
             if not name:
                 continue
 
             # Check if this topic already exists
             found_match = False
             for existing in unique:
-                existing_name = existing.get("topic_name", "").strip().lower()
+                existing_name = (existing.get("topic_name") or "").strip().lower()
                 if name == existing_name or self._name_similarity(name, existing_name) >= 0.9:
                     # Merge - take max relevance score and combine mentioned_by
                     existing["relevance_score"] = max(
@@ -380,8 +380,8 @@ class ConversationAnalyzer:
         seen_pairs = set()
 
         for conn in connections:
-            from_speaker = conn.get("from_speaker", "").strip()
-            to_speaker = conn.get("to_speaker", "").strip()
+            from_speaker = (conn.get("from_speaker") or "").strip()
+            to_speaker = (conn.get("to_speaker") or "").strip()
 
             if not from_speaker or not to_speaker:
                 continue
@@ -525,7 +525,7 @@ Signal types:
             all_profiles = profiles_result.get("data", [])
 
             for speaker in data.get("speakers", []):
-                speaker_name = speaker.get("name", "").strip()
+                speaker_name = (speaker.get("name") or "").strip()
                 if not speaker_name:
                     continue
 
@@ -533,7 +533,7 @@ Signal types:
                 best_score = 0.0
 
                 for profile in all_profiles:
-                    profile_name = profile.get("name", "").strip()
+                    profile_name = (profile.get("name") or "").strip()
                     if not profile_name:
                         continue
 

@@ -746,12 +746,29 @@ def process_transcripts_with_database(uploaded_files, matches_per_person, save_t
         total_transcripts = len(transcripts)
 
         for i, transcript in enumerate(transcripts):
-            progress_pct = 15 + int((i / total_transcripts) * 50)
+            base_progress = 15 + int((i / total_transcripts) * 50)
             status_text.text(f"AI extracting ALL profiles from {transcript['filename']} (chunking large files)...")
-            progress_bar.progress(progress_pct)
+            progress_bar.progress(base_progress)
+
+            # Create progress callback for real-time updates
+            def make_progress_callback(base_pct, file_name, status_elem, progress_elem):
+                def callback(current, total, message):
+                    if total > 0:
+                        chunk_progress = current / total
+                        # Allocate 50% of file progress to chunk processing
+                        file_progress = chunk_progress * (50 / max(total_transcripts, 1))
+                        new_pct = min(65, base_pct + int(file_progress))
+                        progress_elem.progress(new_pct)
+                    status_elem.text(f"{file_name}: {message}")
+                return callback
+
+            chunk_callback = make_progress_callback(base_progress, transcript['filename'], status_text, progress_bar)
 
             # Use AI to extract ALL profiles from transcript (handles large files via chunking)
-            extraction_result = profile_extractor.extract_all_profiles_from_transcript(transcript['content'])
+            extraction_result = profile_extractor.extract_all_profiles_from_transcript(
+                transcript['content'],
+                progress_callback=chunk_callback
+            )
 
             if not extraction_result.get('success'):
                 st.warning(f"Could not extract profiles from {transcript['filename']}: {extraction_result.get('error', 'Unknown error')}")

@@ -109,7 +109,11 @@ class AIProfileExtractor:
                 "data": {}
             }
 
-    def extract_all_profiles_from_transcript(self, transcript_text: str) -> Dict[str, Any]:
+    def extract_all_profiles_from_transcript(
+        self,
+        transcript_text: str,
+        progress_callback: Optional[callable] = None
+    ) -> Dict[str, Any]:
         """
         Extract ALL profiles from a transcript (handles large multi-speaker transcripts)
 
@@ -120,6 +124,7 @@ class AIProfileExtractor:
 
         Args:
             transcript_text: The raw transcript text (any size)
+            progress_callback: Optional callback(current, total, message) for progress updates
 
         Returns:
             Dict containing list of all extracted profiles
@@ -130,22 +135,37 @@ class AIProfileExtractor:
             # Check if transcript is small enough to process directly
             if len(transcript_text) <= MAX_CHUNK_CHARS:
                 # Small transcript - extract multiple profiles in one call
+                if progress_callback:
+                    progress_callback(1, 1, "Processing transcript...")
                 return self._extract_multiple_profiles(transcript_text)
 
             # Large transcript - chunk and process
             chunks = self._chunk_transcript(transcript_text)
-            logger.info(f"Split transcript into {len(chunks)} chunks")
+            total_chunks = len(chunks)
+            logger.info(f"Split transcript into {total_chunks} chunks")
+
+            if progress_callback:
+                progress_callback(0, total_chunks, f"Split into {total_chunks} chunks, starting extraction...")
 
             all_profiles = []
 
             for i, chunk in enumerate(chunks):
-                logger.info(f"Processing chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
+                logger.info(f"Processing chunk {i+1}/{total_chunks} ({len(chunk)} chars)")
+
+                if progress_callback:
+                    progress_callback(i, total_chunks, f"Extracting profiles from chunk {i+1}/{total_chunks}...")
+
                 result = self._extract_multiple_profiles(chunk)
 
                 if result.get("success") and result.get("profiles"):
                     all_profiles.extend(result["profiles"])
+                    if progress_callback:
+                        progress_callback(i + 1, total_chunks, f"Chunk {i+1}/{total_chunks}: Found {len(result['profiles'])} profiles (Total: {len(all_profiles)})")
 
             # Deduplicate profiles by name similarity
+            if progress_callback:
+                progress_callback(total_chunks, total_chunks, f"Deduplicating {len(all_profiles)} profiles...")
+
             unique_profiles = self._deduplicate_profiles(all_profiles)
             logger.info(f"Extracted {len(unique_profiles)} unique profiles from {len(all_profiles)} total")
 
@@ -154,7 +174,7 @@ class AIProfileExtractor:
                 "profiles": unique_profiles,
                 "total_extracted": len(all_profiles),
                 "unique_count": len(unique_profiles),
-                "chunks_processed": len(chunks)
+                "chunks_processed": total_chunks
             }
 
         except Exception as e:
@@ -312,14 +332,14 @@ class AIProfileExtractor:
         unique = []
 
         for profile in profiles:
-            name = profile.get("name", "").strip()
+            name = (profile.get("name") or "").strip()
             if not name:
                 continue
 
             # Check if this profile matches any existing unique profile
             found_match = False
             for existing in unique:
-                existing_name = existing.get("name", "").strip()
+                existing_name = (existing.get("name") or "").strip()
                 similarity = self._fuzzy_match(
                     self._normalize_name(name),
                     self._normalize_name(existing_name)
@@ -426,9 +446,9 @@ class AIProfileExtractor:
             Dict with: {action: 'update'|'create'|'review', profile_id: str|None, confidence: float, match_details: dict}
         """
         try:
-            name = extracted_data.get("name", "").strip()
-            email = extracted_data.get("email", "").strip()
-            company = extracted_data.get("company", "").strip()
+            name = (extracted_data.get("name") or "").strip()
+            email = (extracted_data.get("email") or "").strip()
+            company = (extracted_data.get("company") or "").strip()
 
             if not name:
                 logger.warning("No name found in extracted data")
@@ -476,8 +496,8 @@ class AIProfileExtractor:
             # Strategy 2: Name + Company match (90% confidence)
             if company:
                 for profile in profiles:
-                    profile_name = profile.get("name", "").strip().lower()
-                    profile_company = profile.get("company", "").strip().lower()
+                    profile_name = (profile.get("name") or "").strip().lower()
+                    profile_company = (profile.get("company") or "").strip().lower()
 
                     if (self._normalize_name(profile_name) == self._normalize_name(name.lower()) and
                         profile_company and company.lower() in profile_company):
@@ -496,7 +516,7 @@ class AIProfileExtractor:
 
             # Strategy 3: Exact name match (70% confidence)
             for profile in profiles:
-                profile_name = profile.get("name", "").strip().lower()
+                profile_name = (profile.get("name") or "").strip().lower()
                 if self._normalize_name(profile_name) == self._normalize_name(name.lower()):
                     logger.info(f"Found exact name match: {profile['id']}")
                     return {
@@ -516,7 +536,7 @@ class AIProfileExtractor:
             best_similarity = 0.0
 
             for profile in profiles:
-                profile_name = profile.get("name", "").strip().lower()
+                profile_name = (profile.get("name") or "").strip().lower()
                 similarity = self._fuzzy_match(self._normalize_name(name.lower()), self._normalize_name(profile_name))
 
                 if similarity > best_similarity and similarity >= 0.80:  # 80% string similarity
