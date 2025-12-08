@@ -386,22 +386,71 @@ def show_dashboard():
 
     st.markdown("---")
 
-    # My Profile Summary
+    # My Profile Section
     user_profile = st.session_state.user_profile or {}
-    st.markdown("### My Profile")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown(f"**Name:** {user_profile.get('name', 'N/A')}")
-        st.markdown(f"**Company:** {user_profile.get('company', 'N/A')}")
-        st.markdown(f"**Status:** {user_profile.get('status', 'N/A')}")
-    with col2:
-        st.markdown(f"**List Size:** {user_profile.get('list_size', 0):,}")
-        st.markdown(f"**Social Reach:** {user_profile.get('social_reach', 0):,}")
-        st.markdown(f"**Business Size:** {user_profile.get('business_size', 'N/A')}")
+    tab1, tab2 = st.tabs(["My Profile", "Edit Profile"])
 
-    if user_profile.get('business_focus'):
-        st.markdown(f"**Business Focus:** {user_profile.get('business_focus')}")
+    with tab1:
+        st.markdown("### Profile Summary")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f"**Name:** {user_profile.get('name', 'N/A')}")
+            st.markdown(f"**Company:** {user_profile.get('company', 'N/A')}")
+            st.markdown(f"**Status:** {user_profile.get('status', 'N/A')}")
+        with col2:
+            st.markdown(f"**List Size:** {user_profile.get('list_size', 0):,}")
+            st.markdown(f"**Social Reach:** {user_profile.get('social_reach', 0):,}")
+            st.markdown(f"**Business Size:** {user_profile.get('business_size', 'N/A')}")
+
+        if user_profile.get('business_focus'):
+            st.markdown(f"**Business Focus:** {user_profile.get('business_focus')}")
+        if user_profile.get('service_provided'):
+            st.markdown(f"**Services:** {user_profile.get('service_provided')}")
+
+    with tab2:
+        st.markdown("### Edit Your Profile")
+        st.caption("Update your profile to get better match suggestions")
+
+        with st.form("edit_profile_form"):
+            col1, col2 = st.columns(2)
+
+            with col1:
+                name = st.text_input("Name", value=user_profile.get('name', ''))
+                company = st.text_input("Company", value=user_profile.get('company', ''))
+                business_focus = st.text_area(
+                    "Business Focus",
+                    value=user_profile.get('business_focus', ''),
+                    help="What does your business do? What's your niche?"
+                )
+
+            with col2:
+                service_provided = st.text_area(
+                    "Services Provided",
+                    value=user_profile.get('service_provided', ''),
+                    help="What services do you offer?"
+                )
+                list_size = st.number_input("Email List Size", value=user_profile.get('list_size', 0) or 0, min_value=0)
+                social_reach = st.number_input("Social Media Reach", value=user_profile.get('social_reach', 0) or 0, min_value=0)
+
+            if st.form_submit_button("Save Profile", type="primary", use_container_width=True):
+                update_data = {
+                    "name": name,
+                    "company": company if company else None,
+                    "business_focus": business_focus if business_focus else None,
+                    "service_provided": service_provided if service_provided else None,
+                    "list_size": list_size,
+                    "social_reach": social_reach
+                }
+
+                result = directory_service.update_profile(user_profile['id'], update_data)
+                if result.get('success'):
+                    st.success("Profile updated!")
+                    # Update session state
+                    st.session_state.user_profile.update(update_data)
+                    st.rerun()
+                else:
+                    st.error(f"Error updating profile: {result.get('error')}")
 
 # ==========================================
 # DIRECTORY BROWSER
