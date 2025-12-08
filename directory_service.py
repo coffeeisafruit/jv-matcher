@@ -515,3 +515,340 @@ class DirectoryService:
             return response.data
         except Exception:
             return []
+
+    # ==========================================
+    # RICH JV MATCHING SYSTEM
+    # ==========================================
+
+    def update_match_rich_analysis(self, match_id: str, rich_analysis: dict) -> Dict[str, Any]:
+        """Updates match_suggestions table with rich_analysis JSON and analysis_generated_at timestamp"""
+        try:
+            import json
+            from datetime import datetime
+
+            update_data = {
+                "rich_analysis": json.dumps(rich_analysis),
+                "analysis_generated_at": datetime.utcnow().isoformat()
+            }
+
+            response = self.client.table("match_suggestions") \
+                .update(update_data) \
+                .eq("id", match_id) \
+                .execute()
+
+            return {"success": True, "data": response.data[0] if response.data else None}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_matches_with_rich_analysis(self, profile_id: str, status: str = None) -> List[Dict[str, Any]]:
+        """Gets matches including the rich_analysis field (parsed from JSON), joined with suggested profile data"""
+        try:
+            import json
+
+            query = self.client.table("match_suggestions") \
+                .select("*, suggested:suggested_profile_id(*)") \
+                .eq("profile_id", profile_id)
+
+            if status:
+                query = query.eq("status", status)
+
+            response = query.order("match_score", desc=True).execute()
+
+            # Parse rich_analysis from JSON
+            for match in response.data:
+                if match.get("rich_analysis"):
+                    try:
+                        match["rich_analysis_parsed"] = json.loads(match["rich_analysis"])
+                    except (json.JSONDecodeError, TypeError):
+                        match["rich_analysis_parsed"] = None
+                else:
+                    match["rich_analysis_parsed"] = None
+
+            return response.data
+        except Exception as e:
+            return []
+
+    def track_email_sent(self, match_id: str) -> Dict[str, Any]:
+        """Updates email_sent_at timestamp on match_suggestions and logs to analytics_events"""
+        try:
+            from datetime import datetime
+
+            # Update match_suggestions table
+            update_data = {"email_sent_at": datetime.utcnow().isoformat()}
+
+            self.client.table("match_suggestions") \
+                .update(update_data) \
+                .eq("id", match_id) \
+                .execute()
+
+            # Log to analytics_events
+            self.client.table("analytics_events").insert({
+                "match_id": match_id,
+                "event_type": "email_click",
+                "event_timestamp": datetime.utcnow().isoformat()
+            }).execute()
+
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def record_feedback(self, match_id: str, feedback: str) -> Dict[str, Any]:
+        """Updates user_feedback and feedback_at on match_suggestions, logs to analytics_events"""
+        try:
+            from datetime import datetime
+
+            if feedback not in ['positive', 'negative']:
+                return {"success": False, "error": "Feedback must be 'positive' or 'negative'"}
+
+            # Update match_suggestions table
+            update_data = {
+                "user_feedback": feedback,
+                "feedback_at": datetime.utcnow().isoformat()
+            }
+
+            self.client.table("match_suggestions") \
+                .update(update_data) \
+                .eq("id", match_id) \
+                .execute()
+
+            # Log to analytics_events
+            self.client.table("analytics_events").insert({
+                "match_id": match_id,
+                "event_type": f"feedback_{feedback}",
+                "event_timestamp": datetime.utcnow().isoformat()
+            }).execute()
+
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_analytics_summary(self) -> Dict[str, Any]:
+        """Returns summary stats: total_matches, emails_sent, contacted_count, connected_count, positive/negative feedback"""
+        try:
+            # Total matches
+            total_matches_response = self.client.table("match_suggestions") \
+                .select("*", count="exact") \
+                .execute()
+            total_matches = total_matches_response.count or 0
+
+            # Emails sent
+            emails_sent_response = self.client.table("match_suggestions") \
+                .select("*", count="exact") \
+                .not_.is_("email_sent_at", "null") \
+                .execute()
+            emails_sent = emails_sent_response.count or 0
+
+            # Contacted count
+            contacted_response = self.client.table("match_suggestions") \
+                .select("*", count="exact") \
+                .eq("status", "contacted") \
+                .execute()
+            contacted_count = contacted_response.count or 0
+
+            # Connected count
+            connected_response = self.client.table("match_suggestions") \
+                .select("*", count="exact") \
+                .eq("status", "connected") \
+                .execute()
+            connected_count = connected_response.count or 0
+
+            # Positive feedback
+            positive_feedback_response = self.client.table("match_suggestions") \
+                .select("*", count="exact") \
+                .eq("user_feedback", "positive") \
+                .execute()
+            positive_feedback = positive_feedback_response.count or 0
+
+            # Negative feedback
+            negative_feedback_response = self.client.table("match_suggestions") \
+                .select("*", count="exact") \
+                .eq("user_feedback", "negative") \
+                .execute()
+            negative_feedback = negative_feedback_response.count or 0
+
+            return {
+                "success": True,
+                "data": {
+                    "total_matches": total_matches,
+                    "emails_sent": emails_sent,
+                    "contacted_count": contacted_count,
+                    "connected_count": connected_count,
+                    "positive_feedback": positive_feedback,
+                    "negative_feedback": negative_feedback
+                }
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ==========================================
+    # PROFILE REVIEW QUEUE
+    # ==========================================
+
+    def add_to_review_queue(
+        self,
+        extracted_name: str,
+        extracted_data: dict,
+        candidate_profile_id: str,
+        confidence_score: float,
+        source_transcript: str
+    ) -> Dict[str, Any]:
+        """Inserts into profile_review_queue table"""
+        try:
+            import json
+
+            insert_data = {
+                "extracted_name": extracted_name,
+                "extracted_data": json.dumps(extracted_data),
+                "candidate_profile_id": candidate_profile_id,
+                "confidence_score": confidence_score,
+                "source_transcript": source_transcript,
+                "status": "pending"
+            }
+
+            response = self.client.table("profile_review_queue").insert(insert_data).execute()
+            return {"success": True, "data": response.data[0] if response.data else None}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_pending_reviews(self) -> List[Dict[str, Any]]:
+        """Gets all pending profile reviews with candidate profile data"""
+        try:
+            import json
+
+            response = self.client.table("profile_review_queue") \
+                .select("*, candidate:candidate_profile_id(*)") \
+                .eq("status", "pending") \
+                .order("created_at", desc=True) \
+                .execute()
+
+            # Parse extracted_data from JSON
+            for review in response.data:
+                if review.get("extracted_data"):
+                    try:
+                        review["extracted_data_parsed"] = json.loads(review["extracted_data"])
+                    except (json.JSONDecodeError, TypeError):
+                        review["extracted_data_parsed"] = None
+                else:
+                    review["extracted_data_parsed"] = None
+
+            return response.data
+        except Exception as e:
+            return []
+
+    def resolve_review(self, review_id: str, action: str, reviewed_by: str) -> Dict[str, Any]:
+        """Updates review status to 'approved', 'rejected', or 'merged'"""
+        try:
+            import json
+            from datetime import datetime
+
+            if action not in ['approved', 'rejected', 'merged']:
+                return {"success": False, "error": "Action must be 'approved', 'rejected', or 'merged'"}
+
+            # Get review details
+            review_response = self.client.table("profile_review_queue") \
+                .select("*") \
+                .eq("id", review_id) \
+                .single() \
+                .execute()
+
+            review = review_response.data
+
+            # Update review status
+            update_data = {
+                "status": action,
+                "reviewed_by": reviewed_by,
+                "reviewed_at": datetime.utcnow().isoformat()
+            }
+
+            self.client.table("profile_review_queue") \
+                .update(update_data) \
+                .eq("id", review_id) \
+                .execute()
+
+            # Handle different actions
+            if action == "approved":
+                # Parse extracted data
+                extracted_data = json.loads(review["extracted_data"]) if review.get("extracted_data") else {}
+
+                if review.get("candidate_profile_id"):
+                    # Update existing profile
+                    self.update_profile(review["candidate_profile_id"], extracted_data)
+                else:
+                    # Create new profile
+                    extracted_data["name"] = review["extracted_name"]
+                    self.create_profile(extracted_data)
+
+            elif action == "merged" and review.get("candidate_profile_id"):
+                # Merge data into existing profile
+                extracted_data = json.loads(review["extracted_data"]) if review.get("extracted_data") else {}
+                self.update_profile(review["candidate_profile_id"], extracted_data)
+
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ==========================================
+    # PROFILE SEARCH & FUZZY MATCHING
+    # ==========================================
+
+    def find_profile_by_email(self, email: str) -> Optional[Dict[str, Any]]:
+        """Exact email match lookup"""
+        try:
+            response = self.client.table("profiles") \
+                .select("*") \
+                .eq("email", email) \
+                .single() \
+                .execute()
+            return response.data
+        except Exception:
+            return None
+
+    def search_profiles_fuzzy(self, name: str, company: str = None) -> List[Dict[str, Any]]:
+        """Returns profiles with similarity scores for fuzzy matching"""
+        try:
+            # Use PostgreSQL similarity search (pg_trgm extension)
+            # This requires the pg_trgm extension to be enabled in Supabase
+            query = self.client.table("profiles").select("*")
+
+            # Search by name with ilike for fuzzy matching
+            query = query.ilike("name", f"%{name}%")
+
+            # Optionally filter by company
+            if company:
+                query = query.ilike("company", f"%{company}%")
+
+            response = query.order("name").limit(10).execute()
+
+            # Add simple similarity scores based on string matching
+            results = []
+            for profile in response.data:
+                # Calculate a simple similarity score (0-100)
+                name_lower = name.lower()
+                profile_name_lower = profile.get("name", "").lower()
+
+                # Simple scoring: exact match = 100, contains = 50, partial = 25
+                if profile_name_lower == name_lower:
+                    similarity = 100
+                elif name_lower in profile_name_lower:
+                    similarity = 75
+                elif any(word in profile_name_lower for word in name_lower.split()):
+                    similarity = 50
+                else:
+                    similarity = 25
+
+                # Boost score if company matches
+                if company and profile.get("company"):
+                    company_lower = company.lower()
+                    profile_company_lower = profile.get("company", "").lower()
+                    if company_lower in profile_company_lower or profile_company_lower in company_lower:
+                        similarity = min(100, similarity + 20)
+
+                profile["similarity_score"] = similarity
+                results.append(profile)
+
+            # Sort by similarity score
+            results.sort(key=lambda x: x["similarity_score"], reverse=True)
+
+            return results
+        except Exception as e:
+            return []

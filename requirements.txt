@@ -15,6 +15,9 @@ pandas>=2.0.0
 # AI Services
 openai>=1.0.0
 
+# PDF Generation
+reportlab>=4.0.0
+
 # Transcription (existing)
 openai-whisper
 torch

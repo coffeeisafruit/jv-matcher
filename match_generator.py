@@ -1,14 +1,22 @@
 """
 Match Generator - Creates JV partner suggestions based on profile data
-Supports two modes:
+Supports three modes:
 1. Keyword matching (fast, no API needed)
 2. AI matching via OpenRouter (higher quality, requires API key)
+3. Hybrid matching with rich analysis (semantic + AI analysis)
 """
 import os
 import json
 import re
 from typing import List, Dict, Set, Tuple, Optional
 from directory_service import DirectoryService
+
+# Import rich match service for AI-powered analysis
+try:
+    from rich_match_service import RichMatchService
+    RICH_MATCH_AVAILABLE = True
+except ImportError:
+    RICH_MATCH_AVAILABLE = False
 
 # Optional OpenAI import for AI matching
 try:
@@ -618,6 +626,14 @@ class HybridMatchGenerator:
         except Exception as e:
             print(f"Embedding service not available: {e}")
 
+        # Initialize rich match service for AI analysis
+        self.rich_match_service = None
+        if RICH_MATCH_AVAILABLE:
+            try:
+                self.rich_match_service = RichMatchService(openai_api_key)
+            except Exception as e:
+                print(f"Rich match service not available: {e}")
+
     def calculate_reach_compatibility(self, reach1: int, reach2: int) -> float:
         """
         Calculate reach compatibility score (0-100).
@@ -814,9 +830,10 @@ class HybridMatchGenerator:
         self,
         top_n: int = 10,
         min_score: float = 15.0,
-        only_registered: bool = False
+        only_registered: bool = False,
+        generate_rich_analysis: bool = True
     ) -> Dict:
-        """Generate hybrid matches for all profiles"""
+        """Generate hybrid matches for all profiles with optional rich AI analysis"""
         # Auto-generate embeddings for profiles that don't have them
         if self.embedding_service:
             print("Checking for profiles needing embeddings...")
@@ -839,6 +856,7 @@ class HybridMatchGenerator:
             target_profiles = all_profiles
 
         total_matches = 0
+        total_rich_analyses = 0
         profiles_processed = 0
 
         for target in target_profiles:
@@ -851,7 +869,7 @@ class HybridMatchGenerator:
                 dismissed_ids=dismissed_ids
             )
 
-            # Store matches
+            # Store matches with optional rich analysis
             for match in matches:
                 result = self.directory_service.create_match_suggestion(
                     profile_id=target['id'],
@@ -862,19 +880,36 @@ class HybridMatchGenerator:
                 )
                 if result['success']:
                     total_matches += 1
+                    match_id = result.get('data', {}).get('id')
+
+                    # Generate rich AI analysis if enabled
+                    if generate_rich_analysis and self.rich_match_service and match_id:
+                        try:
+                            rich_result = self.rich_match_service.generate_rich_analysis(
+                                target, match['profile']
+                            )
+                            if rich_result.get('success') and rich_result.get('analysis'):
+                                analysis_result = self.directory_service.update_match_rich_analysis(
+                                    match_id, rich_result['analysis']
+                                )
+                                if analysis_result.get('success'):
+                                    total_rich_analyses += 1
+                        except Exception as e:
+                            print(f"Error generating rich analysis: {e}")
 
             profiles_processed += 1
             if profiles_processed % 50 == 0:
-                print(f"  Processed {profiles_processed}/{len(target_profiles)}...")
+                print(f"  Processed {profiles_processed}/{len(target_profiles)}... ({total_rich_analyses} rich analyses)")
 
         return {
             'success': True,
             'profiles_processed': profiles_processed,
-            'matches_created': total_matches
+            'matches_created': total_matches,
+            'rich_analyses_generated': total_rich_analyses
         }
 
-    def generate_matches_for_user(self, profile_id: str, top_n: int = 10) -> Dict:
-        """Generate hybrid matches for a single user"""
+    def generate_matches_for_user(self, profile_id: str, top_n: int = 10, generate_rich_analysis: bool = True) -> Dict:
+        """Generate hybrid matches for a single user with optional rich AI analysis"""
         # Get user profile
         profile_result = self.directory_service.get_profile_by_id(profile_id)
         if not profile_result.get('success') or not profile_result.get('data'):
@@ -903,7 +938,10 @@ class HybridMatchGenerator:
 
         # Store matches in database
         matches_created = 0
+        rich_analyses_generated = 0
+
         for match in matches:
+            # Create the match suggestion first
             result = self.directory_service.create_match_suggestion(
                 profile_id=profile_id,
                 suggested_profile_id=match['profile']['id'],
@@ -911,12 +949,34 @@ class HybridMatchGenerator:
                 match_reason=match['reason'],
                 source='hybrid_matcher'
             )
+
             if result['success']:
                 matches_created += 1
+                match_id = result.get('data', {}).get('id')
+
+                # Generate rich AI analysis if service available and enabled
+                if generate_rich_analysis and self.rich_match_service and match_id:
+                    try:
+                        rich_result = self.rich_match_service.generate_rich_analysis(
+                            target_profile, match['profile']
+                        )
+
+                        if rich_result.get('success') and rich_result.get('analysis'):
+                            # Store rich analysis in database
+                            analysis_result = self.directory_service.update_match_rich_analysis(
+                                match_id, rich_result['analysis']
+                            )
+                            if analysis_result.get('success'):
+                                rich_analyses_generated += 1
+                                # Add rich analysis to match object for return
+                                match['rich_analysis'] = rich_result['analysis']
+                    except Exception as e:
+                        print(f"Error generating rich analysis for match: {e}")
 
         return {
             'success': True,
             'matches_created': matches_created,
+            'rich_analyses_generated': rich_analyses_generated,
             'matches': matches
         }
 

@@ -15,6 +15,9 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 import zipfile
+import urllib.parse
+import json
+from services.pdf_generator import PDFGenerator
 
 # Import services
 try:
@@ -406,6 +409,27 @@ def show_dashboard():
         if user_profile.get('service_provided'):
             st.markdown(f"**Services:** {user_profile.get('service_provided')}")
 
+        st.markdown("---")
+        st.markdown("### Rich Profile")
+
+        if user_profile.get('what_you_do'):
+            st.markdown(f"**What You Do:** {user_profile.get('what_you_do')}")
+
+        if user_profile.get('who_you_serve'):
+            st.markdown(f"**Who You Serve:** {user_profile.get('who_you_serve')}")
+
+        if user_profile.get('seeking'):
+            st.markdown(f"**What You're Seeking:** {user_profile.get('seeking')}")
+
+        if user_profile.get('offering'):
+            st.markdown(f"**What You're Offering:** {user_profile.get('offering')}")
+
+        if user_profile.get('current_projects'):
+            st.markdown(f"**Current Projects:** {user_profile.get('current_projects')}")
+
+        if user_profile.get('profile_updated_at'):
+            st.caption(f"Last Updated: {user_profile.get('profile_updated_at')}")
+
     with tab2:
         st.markdown("### Edit Your Profile")
         st.caption("Update your profile to get better match suggestions")
@@ -436,6 +460,40 @@ def show_dashboard():
                 list_size = st.number_input("Email List Size", value=user_profile.get('list_size', 0) or 0, min_value=0)
                 social_reach = st.number_input("Social Media Reach", value=user_profile.get('social_reach', 0) or 0, min_value=0)
 
+            st.markdown("---")
+            st.markdown("#### Rich Profile Fields")
+            st.caption("Add more detail to improve match quality")
+
+            what_you_do = st.text_area(
+                "What You Do",
+                value=user_profile.get('what_you_do', ''),
+                help="Describe your business, products, or services in detail"
+            )
+
+            who_you_serve = st.text_area(
+                "Who You Serve",
+                value=user_profile.get('who_you_serve', ''),
+                help="Describe your target audience or ideal customer"
+            )
+
+            seeking = st.text_area(
+                "What You're Seeking",
+                value=user_profile.get('seeking', ''),
+                help="What kind of partnerships or collaborations are you looking for?"
+            )
+
+            offering = st.text_area(
+                "What You're Offering",
+                value=user_profile.get('offering', ''),
+                help="What can you offer to potential partners?"
+            )
+
+            current_projects = st.text_area(
+                "Current Projects",
+                value=user_profile.get('current_projects', ''),
+                help="What are you working on right now?"
+            )
+
             if st.form_submit_button("Save Profile", type="primary", use_container_width=True):
                 if not user_profile.get('id'):
                     st.error("Profile not found. Please log out and log back in.")
@@ -447,7 +505,12 @@ def show_dashboard():
                             "business_focus": business_focus if business_focus else None,
                             "service_provided": service_provided if service_provided else None,
                             "list_size": list_size,
-                            "social_reach": social_reach
+                            "social_reach": social_reach,
+                            "what_you_do": what_you_do if what_you_do else None,
+                            "who_you_serve": who_you_serve if who_you_serve else None,
+                            "seeking": seeking if seeking else None,
+                            "offering": offering if offering else None,
+                            "current_projects": current_projects if current_projects else None
                         }
 
                         result = directory_service.update_profile(user_profile['id'], update_data)
@@ -778,8 +841,32 @@ def show_matches():
         if 'matches_count' in st.session_state:
             del st.session_state['matches_count']
 
-    # Refresh matches button
-    col_refresh, col_spacer = st.columns([1, 3])
+    # Top buttons row
+    col_report, col_refresh, col_refresh_analysis, col_spacer = st.columns([1, 1, 1, 1])
+
+    with col_report:
+        if st.button("Generate My Report", type="primary", help="Generate PDF report of all matches"):
+            with st.spinner("Generating report..."):
+                try:
+                    # Get all matches
+                    matches = directory_service.get_match_suggestions(user_profile['id'], status=None)
+
+                    # Generate PDF
+                    pdf_gen = PDFGenerator()
+                    pdf_path = pdf_gen.generate_user_report(user_profile, matches)
+
+                    # Offer download
+                    with open(pdf_path, 'rb') as f:
+                        st.download_button(
+                            label="Download Report PDF",
+                            data=f.read(),
+                            file_name=f"jv_matches_{user_profile.get('name', 'user')}.pdf",
+                            mime="application/pdf"
+                        )
+                    st.success("Report generated successfully!")
+                except Exception as e:
+                    st.error(f"Error generating report: {str(e)}")
+
     with col_refresh:
         if st.button("Refresh My Matches", type="secondary", help="Regenerate matches based on your current profile"):
             with st.spinner("Finding your best matches..."):
@@ -801,6 +888,26 @@ def show_matches():
                         st.error(f"Error: {result.get('error', 'Unknown error')}")
                 except Exception as e:
                     st.error(f"Error refreshing matches: {str(e)}")
+
+    with col_refresh_analysis:
+        if st.button("Refresh Analysis", type="secondary", help="Regenerate rich analysis for all matches"):
+            with st.spinner("Regenerating analysis..."):
+                try:
+                    # Get all matches
+                    matches = directory_service.get_match_suggestions(user_profile['id'], status=None)
+
+                    # Regenerate analysis for each match
+                    count = 0
+                    for match in matches:
+                        # Call service to regenerate analysis
+                        result = directory_service.regenerate_match_analysis(match['id'])
+                        if result.get('success'):
+                            count += 1
+
+                    st.success(f"Regenerated analysis for {count} matches!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error regenerating analysis: {str(e)}")
 
     st.markdown("---")
 
@@ -863,7 +970,7 @@ def show_matches():
             status = match.get('status', 'pending')
 
             # Create expandable card for each match
-            with st.expander(f"**{suggested.get('name', 'Unknown')}** - {score}% match", expanded=(status == 'viewed')):
+            with st.expander(f"**{suggested.get('name', 'Unknown')}** - {score}/100", expanded=(status == 'viewed')):
                 # Header info
                 col1, col2 = st.columns([2, 1])
 
@@ -876,16 +983,95 @@ def show_matches():
                         st.markdown(f"**Services:** {suggested['service_provided']}")
 
                 with col2:
-                    st.markdown(f'<span class="match-score">{score}% match</span>', unsafe_allow_html=True)
+                    st.markdown(f'<span class="match-score">{score}/100</span>', unsafe_allow_html=True)
                     if suggested.get('social_reach'):
                         st.caption(f"Reach: {suggested['social_reach']:,}")
                     if suggested.get('list_size'):
                         st.caption(f"List: {suggested['list_size']:,}")
 
-                # Match reason
-                if match.get('match_reason'):
+                # Rich Analysis Section
+                rich_analysis = match.get('rich_analysis')
+                if rich_analysis:
+                    try:
+                        if isinstance(rich_analysis, str):
+                            analysis = json.loads(rich_analysis)
+                        else:
+                            analysis = rich_analysis
+
+                        st.markdown("---")
+                        st.markdown("### Match Analysis")
+
+                        if analysis.get('why_this_works'):
+                            st.markdown(f"**Why This Works:** {analysis['why_this_works']}")
+
+                        if analysis.get('collaboration_opportunity'):
+                            st.markdown(f"**Collaboration Opportunity:** {analysis['collaboration_opportunity']}")
+
+                        if analysis.get('mutual_benefits'):
+                            st.markdown(f"**Mutual Benefits:** {analysis['mutual_benefits']}")
+
+                        if analysis.get('estimated_revenue_potential'):
+                            st.markdown(f"**Estimated Revenue Potential:** {analysis['estimated_revenue_potential']}")
+                            st.caption("*AI-generated estimate based on profile data*")
+
+                        if analysis.get('timing'):
+                            st.markdown(f"**Timing:** {analysis['timing']}")
+
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+                # Match reason (fallback if no rich analysis)
+                if match.get('match_reason') and not rich_analysis:
                     st.markdown("---")
                     st.markdown(f"**Why this match:** {match['match_reason']}")
+
+                # Outreach message section
+                st.markdown("---")
+                st.markdown("### Outreach")
+
+                outreach_message = st.text_area(
+                    "Draft your outreach message",
+                    value=match.get('outreach_message', ''),
+                    key=f"outreach_{match['id']}",
+                    help="Draft your message to this potential partner"
+                )
+
+                # Save outreach message if changed
+                if outreach_message != match.get('outreach_message', ''):
+                    if st.button("Save Message", key=f"save_msg_{match['id']}"):
+                        directory_service.update_match_outreach(match['id'], outreach_message)
+                        st.success("Message saved!")
+
+                # Contact button
+                if suggested.get('email'):
+                    subject = f"Partnership Opportunity - {user_profile.get('name', 'JV Directory')}"
+                    body = outreach_message if outreach_message else f"Hi {suggested.get('name', 'there')},\n\nI came across your profile and think we might have a great partnership opportunity..."
+
+                    mailto_link = f"mailto:{suggested['email']}?subject={urllib.parse.quote(subject)}&body={urllib.parse.quote(body)}"
+
+                    col_email, col_spacer = st.columns([1, 3])
+                    with col_email:
+                        st.markdown(f'<a href="{mailto_link}" target="_blank"><button style="width:100%;padding:0.5rem;background-color:#4CAF50;color:white;border:none;border-radius:0.25rem;cursor:pointer;">Send Email</button></a>', unsafe_allow_html=True)
+                else:
+                    st.info("Contact info not available")
+
+                # Feedback buttons after contacted
+                if status == 'contacted':
+                    st.markdown("---")
+                    st.markdown("**How did it go?**")
+                    col_feedback1, col_feedback2, col_spacer = st.columns([1, 1, 2])
+
+                    with col_feedback1:
+                        if st.button("👍 Positive", key=f"pos_{match['id']}"):
+                            directory_service.update_match_feedback(match['id'], 'positive')
+                            st.success("Feedback recorded!")
+                            st.rerun()
+
+                    with col_feedback2:
+                        if st.button("👎 Negative", key=f"neg_{match['id']}"):
+                            directory_service.update_match_feedback(match['id'], 'negative')
+                            st.info("Feedback recorded!")
+                            st.rerun()
 
                 # Action buttons
                 st.markdown("---")
@@ -1081,7 +1267,7 @@ def show_admin():
         st.error("Admin access required")
         return
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Add Profile", "Import CSV", "Export", "Generate Matches"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Add Profile", "Import CSV", "Export", "Generate Matches", "Analytics", "Pending Reviews"])
 
     with tab1:
         show_add_profile_form()
@@ -1094,6 +1280,12 @@ def show_admin():
 
     with tab4:
         show_generate_matches()
+
+    with tab5:
+        show_analytics()
+
+    with tab6:
+        show_pending_reviews()
 
 def show_add_profile_form():
     """Form to add a new profile"""
@@ -1283,6 +1475,121 @@ def show_generate_matches():
                             st.markdown(f"- **{profile.get('name')}** ({match['score']}%) - {match['reason']}")
                 else:
                     st.error(f"Error: {match_result.get('error')}")
+
+def show_analytics():
+    """Show analytics dashboard"""
+    st.markdown("### Analytics Dashboard")
+
+    directory_service = DirectoryService(use_admin=True)
+
+    try:
+        # Fetch analytics data
+        analytics = directory_service.get_analytics()
+
+        # Display metrics in columns
+        col1, col2, col3, col4, col5 = st.columns(5)
+
+        with col1:
+            st.metric("Total Matches", analytics.get('total_matches', 0))
+
+        with col2:
+            st.metric("Emails Sent", analytics.get('emails_sent', 0))
+
+        with col3:
+            st.metric("Contacted", analytics.get('contacted', 0))
+
+        with col4:
+            st.metric("Connected", analytics.get('connected', 0))
+
+        with col5:
+            st.metric("Positive Feedback", analytics.get('positive_feedback', 0))
+
+        st.markdown("---")
+
+        # Additional analytics
+        if analytics.get('match_stats'):
+            st.markdown("### Match Statistics")
+            st.json(analytics['match_stats'])
+
+    except Exception as e:
+        st.error(f"Error loading analytics: {str(e)}")
+
+def show_pending_reviews():
+    """Show pending profile reviews"""
+    st.markdown("### Pending Profile Reviews")
+
+    directory_service = DirectoryService(use_admin=True)
+
+    try:
+        # Fetch pending reviews
+        pending = directory_service.get_pending_reviews()
+
+        if pending:
+            st.markdown(f"**{len(pending)} profiles awaiting review**")
+
+            for review in pending:
+                with st.expander(f"{review.get('extracted_name', 'Unknown')} - Confidence: {review.get('confidence_score', 0)}%"):
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.markdown("**Extracted Information:**")
+                        st.markdown(f"**Name:** {review.get('extracted_name', 'N/A')}")
+                        if review.get('extracted_email'):
+                            st.markdown(f"**Email:** {review.get('extracted_email')}")
+                        if review.get('extracted_company'):
+                            st.markdown(f"**Company:** {review.get('extracted_company')}")
+                        st.markdown(f"**Confidence:** {review.get('confidence_score', 0)}%")
+
+                    with col2:
+                        if review.get('candidate_match'):
+                            st.markdown("**Possible Match:**")
+                            candidate = review['candidate_match']
+                            st.markdown(f"**Name:** {candidate.get('name', 'N/A')}")
+                            if candidate.get('email'):
+                                st.markdown(f"**Email:** {candidate.get('email')}")
+                            if candidate.get('company'):
+                                st.markdown(f"**Company:** {candidate.get('company')}")
+
+                    st.markdown("---")
+
+                    # Action buttons
+                    col1, col2, col3, col_spacer = st.columns([1, 1, 1, 1])
+
+                    with col1:
+                        if review.get('candidate_match'):
+                            if st.button("Link to Existing", key=f"link_{review['id']}"):
+                                result = directory_service.link_review_to_profile(
+                                    review['id'],
+                                    review['candidate_match']['id']
+                                )
+                                if result.get('success'):
+                                    st.success("Linked successfully!")
+                                    st.rerun()
+                                else:
+                                    st.error("Error linking profile")
+
+                    with col2:
+                        if st.button("Create New", key=f"create_{review['id']}"):
+                            result = directory_service.create_profile_from_review(review['id'])
+                            if result.get('success'):
+                                st.success("Profile created!")
+                                st.rerun()
+                            else:
+                                st.error("Error creating profile")
+
+                    with col3:
+                        if st.button("Skip", key=f"skip_{review['id']}"):
+                            result = directory_service.skip_review(review['id'])
+                            if result.get('success'):
+                                st.info("Review skipped")
+                                st.rerun()
+                            else:
+                                st.error("Error skipping review")
+        else:
+            st.info("No pending reviews")
+
+    except Exception as e:
+        st.error(f"Error loading pending reviews: {str(e)}")
 
 # ==========================================
 # HELP PAGE

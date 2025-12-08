@@ -33,6 +33,8 @@ ENV/
 outputs/
 *.zip
 *.pdf
+*.wav
+*_transcription.txt
 
 # Testing
 .pytest_cache/
