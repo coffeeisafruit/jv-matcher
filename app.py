@@ -851,16 +851,16 @@ def show_matches():
                     # Get all matches with rich analysis
                     matches = directory_service.get_matches_with_rich_analysis(user_profile['id'])
 
-                    # Prepare data for PDF generator
+                    # Prepare data for PDF generator with required field defaults
                     report_data = {
-                        "participant": user_profile.get('name', 'Unknown'),
+                        "participant": user_profile.get('name') or 'Unknown',
                         "date": datetime.now().strftime("%B %d, %Y at %I:%M %p"),
                         "profile": {
-                            "what_you_do": user_profile.get('what_you_do') or user_profile.get('business_focus', ''),
-                            "who_you_serve": user_profile.get('who_you_serve', ''),
-                            "seeking": user_profile.get('seeking', ''),
-                            "offering": user_profile.get('offering') or user_profile.get('service_provided', ''),
-                            "current_projects": user_profile.get('current_projects', '')
+                            "what_you_do": user_profile.get('what_you_do') or user_profile.get('business_focus') or 'Business professional',
+                            "who_you_serve": user_profile.get('who_you_serve') or 'Various clients',
+                            "seeking": user_profile.get('seeking') or 'Partnership opportunities',
+                            "offering": user_profile.get('offering') or user_profile.get('service_provided') or 'Professional services',
+                            "current_projects": user_profile.get('current_projects') or ''
                         },
                         "matches": []
                     }
@@ -875,18 +875,24 @@ def show_matches():
                             except:
                                 rich = {}
 
+                        # Get values with defaults for required fields
+                        match_name = suggested.get('name') or 'Unknown Partner'
+                        match_reason = m.get('match_reason', '')
+                        outreach_msg = rich.get('outreach_message') or f"Hi {match_name}, I'd love to explore partnership opportunities with you."
+                        contact_email = suggested.get('email') or 'Contact info not available'
+
                         report_data["matches"].append({
-                            "name": suggested.get('name', 'Unknown'),
+                            "name": match_name,
                             "company": suggested.get('company', ''),
                             "score": m.get('match_score', 0),
-                            "type": rich.get('match_type', 'Partnership'),
-                            "fit": rich.get('fit', m.get('match_reason', '')),
+                            "type": rich.get('match_type') or 'Partnership',
+                            "fit": rich.get('fit') or match_reason or 'Potential partnership opportunity',
                             "opportunity": rich.get('opportunity', ''),
                             "benefits": rich.get('benefits', ''),
                             "revenue": rich.get('revenue_estimate', ''),
                             "timing": rich.get('timing', ''),
-                            "message": rich.get('outreach_message', ''),
-                            "contact": suggested.get('email', '')
+                            "message": outreach_msg,
+                            "contact": contact_email
                         })
 
                     # Generate PDF
