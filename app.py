@@ -836,10 +836,17 @@ def show_matches():
 
     # Show success message if matches were just refreshed
     if st.session_state.get('matches_refreshed'):
-        st.success(f"Matches refreshed! Found {st.session_state.get('matches_count', 0)} new matches.")
+        matches_count = st.session_state.get('matches_count', 0)
+        analyses_count = st.session_state.get('analyses_count', 0)
+        if analyses_count > 0:
+            st.success(f"Found {matches_count} matches with {analyses_count} AI analyses generated!")
+        else:
+            st.success(f"Found {matches_count} new matches.")
         del st.session_state['matches_refreshed']
         if 'matches_count' in st.session_state:
             del st.session_state['matches_count']
+        if 'analyses_count' in st.session_state:
+            del st.session_state['analyses_count']
 
     # Top buttons row
     col_report, col_refresh, col_refresh_analysis, col_spacer = st.columns([1, 1, 1, 1])
@@ -911,26 +918,36 @@ def show_matches():
                     st.error(f"Error generating report: {str(e)}")
 
     with col_refresh:
-        if st.button("Refresh My Matches", type="secondary", help="Regenerate matches based on your current profile"):
-            with st.spinner("Finding your best matches..."):
-                try:
-                    # Use hybrid matcher if OpenAI key available
-                    import os
-                    if os.getenv("OPENAI_API_KEY"):
-                        generator = HybridMatchGenerator()
-                    else:
-                        generator = MatchGenerator()
+        if st.button("Refresh My Matches", type="secondary", help="Regenerate matches and AI analysis based on your profile"):
+            try:
+                import os
 
-                    result = generator.generate_matches_for_user(user_profile['id'], top_n=10)
+                # Show progress
+                status_text = st.empty()
+                status_text.info("Finding your best matches and generating AI analysis... This may take 30-60 seconds.")
 
-                    if result.get('success'):
-                        st.session_state['matches_refreshed'] = True
-                        st.session_state['matches_count'] = result.get('matches_created', 0)
-                        st.rerun()
-                    else:
-                        st.error(f"Error: {result.get('error', 'Unknown error')}")
-                except Exception as e:
-                    st.error(f"Error refreshing matches: {str(e)}")
+                # Use hybrid matcher if OpenAI key available
+                if os.getenv("OPENAI_API_KEY"):
+                    generator = HybridMatchGenerator()
+                else:
+                    generator = MatchGenerator()
+
+                result = generator.generate_matches_for_user(user_profile['id'], top_n=10)
+
+                status_text.empty()
+
+                if result.get('success'):
+                    matches_count = result.get('matches_created', 0)
+                    analyses_count = result.get('rich_analyses_generated', 0)
+
+                    st.session_state['matches_refreshed'] = True
+                    st.session_state['matches_count'] = matches_count
+                    st.session_state['analyses_count'] = analyses_count
+                    st.rerun()
+                else:
+                    st.error(f"Error: {result.get('error', 'Unknown error')}")
+            except Exception as e:
+                st.error(f"Error refreshing matches: {str(e)}")
 
     with col_refresh_analysis:
         if st.button("Refresh Analysis", type="secondary", help="Regenerate rich analysis for all matches"):
@@ -1077,21 +1094,25 @@ def show_matches():
                         st.markdown("---")
                         st.markdown("### Match Analysis")
 
-                        if analysis.get('why_this_works'):
-                            st.markdown(f"**Why This Works:** {analysis['why_this_works']}")
+                        if analysis.get('fit'):
+                            st.markdown(f"**Why This Works:** {analysis['fit']}")
 
-                        if analysis.get('collaboration_opportunity'):
-                            st.markdown(f"**Collaboration Opportunity:** {analysis['collaboration_opportunity']}")
+                        if analysis.get('opportunity'):
+                            st.markdown(f"**Collaboration Opportunity:** {analysis['opportunity']}")
 
-                        if analysis.get('mutual_benefits'):
-                            st.markdown(f"**Mutual Benefits:** {analysis['mutual_benefits']}")
+                        if analysis.get('benefits'):
+                            st.markdown(f"**Mutual Benefits:** {analysis['benefits']}")
 
-                        if analysis.get('estimated_revenue_potential'):
-                            st.markdown(f"**Estimated Revenue Potential:** {analysis['estimated_revenue_potential']}")
+                        if analysis.get('revenue_estimate'):
+                            st.markdown(f"**Estimated Revenue Potential:** {analysis['revenue_estimate']}")
                             st.caption("*AI-generated estimate based on profile data*")
 
                         if analysis.get('timing'):
                             st.markdown(f"**Timing:** {analysis['timing']}")
+
+                        # Pre-fill outreach message from analysis if available
+                        if analysis.get('outreach_message') and not match.get('outreach_message'):
+                            match['outreach_message'] = analysis['outreach_message']
 
                     except (json.JSONDecodeError, TypeError):
                         pass
