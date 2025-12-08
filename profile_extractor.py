@@ -84,8 +84,7 @@ class AIProfileExtractor:
                     {"role": "system", "content": "You are an expert at extracting structured business profile data from conversations."},
                     {"role": "user", "content": f"{prompt}\n\n{transcript_text}"}
                 ],
-                response_format={"type": "json_object"},
-                temperature=0.3
+                response_format={"type": "json_object"}
             )
 
             extracted_data = json.loads(response.choices[0].message.content)

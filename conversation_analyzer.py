@@ -144,8 +144,7 @@ class ConversationAnalyzer:
                     },
                     {"role": "user", "content": prompt}
                 ],
-                response_format={"type": "json_object"},
-                temperature=0.3
+                response_format={"type": "json_object"}
             )
 
             data = json.loads(response.choices[0].message.content)
