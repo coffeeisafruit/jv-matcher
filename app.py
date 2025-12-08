@@ -787,49 +787,62 @@ def show_matches():
             if not suggested:
                 continue
 
-            with st.container():
-                col1, col2, col3 = st.columns([3, 2, 1])
+            score = match.get('match_score', 0)
+            status = match.get('status', 'pending')
+
+            # Create expandable card for each match
+            with st.expander(f"**{suggested.get('name', 'Unknown')}** - {score}% match", expanded=(status == 'viewed')):
+                # Header info
+                col1, col2 = st.columns([2, 1])
 
                 with col1:
-                    st.markdown(f"**{suggested.get('name', 'Unknown')}**")
                     if suggested.get('company'):
-                        st.caption(suggested['company'])
+                        st.markdown(f"**Company:** {suggested['company']}")
+                    if suggested.get('business_focus'):
+                        st.markdown(f"**Focus:** {suggested['business_focus']}")
+                    if suggested.get('service_provided'):
+                        st.markdown(f"**Services:** {suggested['service_provided']}")
 
                 with col2:
-                    score = match.get('match_score', 0)
                     st.markdown(f'<span class="match-score">{score}% match</span>', unsafe_allow_html=True)
-                    st.caption(f"Status: {match.get('status', 'pending')}")
+                    if suggested.get('social_reach'):
+                        st.caption(f"Reach: {suggested['social_reach']:,}")
+                    if suggested.get('list_size'):
+                        st.caption(f"List: {suggested['list_size']:,}")
 
-                with col3:
-                    if match.get('status') == 'pending':
-                        if st.button("View", key=f"view_{match['id']}"):
+                # Match reason
+                if match.get('match_reason'):
+                    st.markdown("---")
+                    st.markdown(f"**Why this match:** {match['match_reason']}")
+
+                # Action buttons
+                st.markdown("---")
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    if status == 'pending':
+                        if st.button("Mark as Viewed", key=f"view_{match['id']}", type="primary"):
                             directory_service.update_match_status(match['id'], 'viewed')
                             st.rerun()
-                    elif match.get('status') == 'viewed':
-                        if st.button("Contact", key=f"contact_{match['id']}"):
+                    elif status == 'viewed':
+                        if st.button("Mark as Contacted", key=f"contact_{match['id']}", type="primary"):
                             directory_service.update_match_status(match['id'], 'contacted')
                             st.rerun()
+                    elif status == 'contacted':
+                        st.success("Contacted")
 
-                # Show match reason and collaboration idea
-                if match.get('match_reason'):
-                    match_reason = match['match_reason']
-                    st.caption(f"Why: {match_reason}")
+                with col2:
+                    if st.button("Connect", key=f"connect_{match['id']}"):
+                        directory_service.add_connection(user_profile['id'], suggested['id'])
+                        directory_service.update_match_status(match['id'], 'connected')
+                        st.success("Connected!")
+                        st.rerun()
 
-                    # Show collaboration idea if available
-                    if 'collaboration_idea' in match_reason.lower() or 'collaborate' in match_reason.lower():
-                        st.info(match_reason)
-
-                # Dismiss button
-                if match.get('status') not in ['dismissed', 'connected']:
-                    if st.button("Dismiss", key=f"dismiss_{match['id']}", type="secondary"):
-                        result = directory_service.dismiss_match(match['id'])
-                        if result.get('success'):
-                            st.success("Match dismissed")
+                with col3:
+                    if status not in ['dismissed', 'connected']:
+                        if st.button("Dismiss", key=f"dismiss_{match['id']}", type="secondary"):
+                            directory_service.dismiss_match(user_profile['id'], suggested['id'])
                             st.rerun()
-                        else:
-                            st.error("Failed to dismiss match")
-
-                st.markdown("---")
     else:
         st.info("No match suggestions yet. Check back after matches are generated.")
 
