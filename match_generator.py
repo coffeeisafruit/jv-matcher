@@ -82,6 +82,18 @@ class MatchGenerator:
         'tech': ['technology', 'software', 'digital', 'online', 'internet', 'website', 'app']
     }
 
+    # Collaboration templates based on category combinations
+    COLLABORATION_TEMPLATES = {
+        ('health', 'content'): "Health expert interviews and wellness content series",
+        ('health', 'business'): "Wellness programs for entrepreneurs and business teams",
+        ('finance', 'business'): "Joint webinar on business financial strategies",
+        ('personal_dev', 'business'): "Mindset workshop for entrepreneurs",
+        ('content', 'content'): "Guest appearances on each other's podcasts/shows",
+        ('tech', 'business'): "Technology solutions workshop for business clients",
+        ('relationships', 'personal_dev'): "Personal growth coaching partnership",
+        ('spirituality', 'health'): "Holistic wellness retreat collaboration",
+    }
+
     def __init__(self):
         self.directory_service = DirectoryService(use_admin=True)
 
@@ -105,6 +117,16 @@ class MatchGenerator:
             if any(kw in keywords for kw in cat_keywords):
                 categories.add(category)
         return categories
+
+    def generate_collaboration_idea(self, target_categories: Set[str], match_categories: Set[str]) -> str:
+        """Generate specific collaboration suggestion based on categories"""
+        for t_cat in target_categories:
+            for m_cat in match_categories:
+                if (t_cat, m_cat) in self.COLLABORATION_TEMPLATES:
+                    return self.COLLABORATION_TEMPLATES[(t_cat, m_cat)]
+                if (m_cat, t_cat) in self.COLLABORATION_TEMPLATES:
+                    return self.COLLABORATION_TEMPLATES[(m_cat, t_cat)]
+        return "Cross-promotion to complementary audiences"
 
     def calculate_match_score(
         self,
@@ -130,53 +152,106 @@ class MatchGenerator:
 
         return round(combined_score, 1), list(common_keywords)[:5]
 
+    def calculate_mutual_score(self, profile1: Dict, profile2: Dict) -> Tuple[float, List[str], str]:
+        """Calculate mutual match score (both directions) and collaboration idea"""
+        # Get text and keywords for both profiles
+        text1 = ' '.join(filter(None, [
+            profile1.get('business_focus', ''),
+            profile1.get('service_provided', ''),
+            profile1.get('company', '')
+        ]))
+        keywords1 = self.extract_keywords(text1)
+        categories1 = self.get_categories(keywords1)
+
+        text2 = ' '.join(filter(None, [
+            profile2.get('business_focus', ''),
+            profile2.get('service_provided', ''),
+            profile2.get('company', '')
+        ]))
+        keywords2 = self.extract_keywords(text2)
+        categories2 = self.get_categories(keywords2)
+
+        # Calculate score A->B
+        score_ab, common_keywords_ab = self.calculate_match_score(
+            keywords1, keywords2, categories1, categories2
+        )
+
+        # Calculate score B->A
+        score_ba, common_keywords_ba = self.calculate_match_score(
+            keywords2, keywords1, categories2, categories1
+        )
+
+        # Use average score and combined keywords
+        mutual_score = round((score_ab + score_ba) / 2, 1)
+        common_keywords = list(set(common_keywords_ab + common_keywords_ba))[:5]
+
+        # Generate collaboration idea
+        collaboration_idea = self.generate_collaboration_idea(categories1, categories2)
+
+        return mutual_score, common_keywords, collaboration_idea
+
     def generate_match_reason(
         self,
         target_name: str,
         match_name: str,
         common_keywords: List[str],
-        score: float
+        score: float,
+        collaboration_idea: str = None
     ) -> str:
         """Generate human-readable match reason"""
         if not common_keywords:
-            return f"{match_name} has complementary skills that could create valuable partnership opportunities."
-
-        if len(common_keywords) >= 3:
+            base_reason = f"{match_name} has complementary skills that could create valuable partnership opportunities."
+        elif len(common_keywords) >= 3:
             kw_text = f"{', '.join(common_keywords[:2])}, and {common_keywords[2]}"
+            if score >= 70:
+                base_reason = f"Strong alignment in {kw_text}. Highly compatible for joint ventures."
+            elif score >= 50:
+                base_reason = f"Shared focus on {kw_text}. Good potential for collaboration."
+            else:
+                base_reason = f"Common interests in {kw_text}. Worth exploring partnership opportunities."
         elif len(common_keywords) == 2:
             kw_text = f"{common_keywords[0]} and {common_keywords[1]}"
+            if score >= 70:
+                base_reason = f"Strong alignment in {kw_text}. Highly compatible for joint ventures."
+            elif score >= 50:
+                base_reason = f"Shared focus on {kw_text}. Good potential for collaboration."
+            else:
+                base_reason = f"Common interests in {kw_text}. Worth exploring partnership opportunities."
         else:
             kw_text = common_keywords[0]
+            if score >= 70:
+                base_reason = f"Strong alignment in {kw_text}. Highly compatible for joint ventures."
+            elif score >= 50:
+                base_reason = f"Shared focus on {kw_text}. Good potential for collaboration."
+            else:
+                base_reason = f"Common interests in {kw_text}. Worth exploring partnership opportunities."
 
-        if score >= 70:
-            return f"Strong alignment in {kw_text}. Highly compatible for joint ventures."
-        elif score >= 50:
-            return f"Shared focus on {kw_text}. Good potential for collaboration."
-        else:
-            return f"Common interests in {kw_text}. Worth exploring partnership opportunities."
+        # Add collaboration idea if provided
+        if collaboration_idea:
+            return f"{base_reason} Suggested collaboration: {collaboration_idea}"
+        return base_reason
 
     def generate_matches_for_profile(
         self,
         target_profile: Dict,
         all_profiles: List[Dict],
         top_n: int = 10,
-        min_score: float = 10.0
+        min_score: float = 10.0,
+        dismissed_ids: Set[str] = None
     ) -> List[Dict]:
         """Generate top matches for a single profile"""
-        # Extract target profile data
-        target_text = ' '.join(filter(None, [
-            target_profile.get('business_focus', ''),
-            target_profile.get('service_provided', ''),
-            target_profile.get('company', '')
-        ]))
-        target_keywords = self.extract_keywords(target_text)
-        target_categories = self.get_categories(target_keywords)
+        if dismissed_ids is None:
+            dismissed_ids = set()
 
         matches = []
 
         for profile in all_profiles:
             # Skip self
             if profile['id'] == target_profile['id']:
+                continue
+
+            # Skip dismissed profiles
+            if profile['id'] in dismissed_ids:
                 continue
 
             # Extract profile data
@@ -192,10 +267,9 @@ class MatchGenerator:
             if not profile_keywords and not profile_categories:
                 continue
 
-            # Calculate match
-            score, common_keywords = self.calculate_match_score(
-                target_keywords, profile_keywords,
-                target_categories, profile_categories
+            # Calculate mutual match score and collaboration idea
+            score, common_keywords, collaboration_idea = self.calculate_mutual_score(
+                target_profile, profile
             )
 
             # Only include if above minimum score
@@ -204,11 +278,13 @@ class MatchGenerator:
                     'profile': profile,
                     'score': score,
                     'common_keywords': common_keywords,
+                    'collaboration_idea': collaboration_idea,
                     'reason': self.generate_match_reason(
                         target_profile.get('name', ''),
                         profile.get('name', ''),
                         common_keywords,
-                        score
+                        score,
+                        collaboration_idea
                     )
                 })
 

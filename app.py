@@ -35,6 +35,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Match categories
+MATCH_CATEGORIES = ["All", "health", "business", "finance", "personal_dev", "spirituality", "relationships", "content", "tech"]
+
 # Custom CSS
 st.markdown("""
 <style>
@@ -302,7 +305,7 @@ def show_main_app():
         st.markdown("---")
 
         # Navigation pages
-        pages = ["Dashboard", "Directory", "Search", "Process Transcripts", "My Matches", "My Connections"]
+        pages = ["Dashboard", "Directory", "Search", "Process Transcripts", "My Matches", "My Preferences", "My Connections"]
         if is_admin:
             pages.append("Admin")
 
@@ -328,6 +331,8 @@ def show_main_app():
         show_process_transcripts()
     elif page == "My Matches":
         show_matches()
+    elif page == "My Preferences":
+        show_preferences()
     elif page == "My Connections":
         show_connections()
     elif page == "Admin":
@@ -727,13 +732,52 @@ def show_matches():
 
     directory_service = DirectoryService(use_admin=True)
 
-    # Filter by status
-    status_filter = st.selectbox("Filter", ["All", "pending", "viewed", "contacted", "connected", "dismissed"])
+    # Filters
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        status_filter = st.selectbox("Status", ["All", "pending", "viewed", "contacted", "connected", "dismissed"])
+
+    with col2:
+        category_filter = st.multiselect("Categories", MATCH_CATEGORIES, default=["All"])
+        if "All" in category_filter or not category_filter:
+            category_filter = None
+
+    with col3:
+        use_reach_filter = st.checkbox("Filter by reach")
+        if use_reach_filter:
+            reach_range = st.slider("Reach Range", min_value=0, max_value=1000000, value=(0, 100000), step=10000, format="%d")
+        else:
+            reach_range = None
 
     matches = directory_service.get_match_suggestions(
         user_profile['id'],
         status=status_filter if status_filter != "All" else None
     )
+
+    # Apply client-side filters
+    if matches:
+        filtered_matches = []
+        for match in matches:
+            suggested = match.get('suggested', {})
+            if not suggested:
+                continue
+
+            # Category filter
+            if category_filter:
+                match_categories = match.get('categories', [])
+                if not match_categories or not any(cat in category_filter for cat in match_categories):
+                    continue
+
+            # Reach filter
+            if reach_range:
+                social_reach = suggested.get('social_reach', 0) or 0
+                if not (reach_range[0] <= social_reach <= reach_range[1]):
+                    continue
+
+            filtered_matches.append(match)
+
+        matches = filtered_matches
 
     if matches:
         st.markdown(f"**{len(matches)} matches**")
@@ -766,12 +810,122 @@ def show_matches():
                             directory_service.update_match_status(match['id'], 'contacted')
                             st.rerun()
 
+                # Show match reason and collaboration idea
                 if match.get('match_reason'):
-                    st.caption(f"Why: {match['match_reason']}")
+                    match_reason = match['match_reason']
+                    st.caption(f"Why: {match_reason}")
+
+                    # Show collaboration idea if available
+                    if 'collaboration_idea' in match_reason.lower() or 'collaborate' in match_reason.lower():
+                        st.info(match_reason)
+
+                # Dismiss button
+                if match.get('status') not in ['dismissed', 'connected']:
+                    if st.button("Dismiss", key=f"dismiss_{match['id']}", type="secondary"):
+                        result = directory_service.dismiss_match(match['id'])
+                        if result.get('success'):
+                            st.success("Match dismissed")
+                            st.rerun()
+                        else:
+                            st.error("Failed to dismiss match")
 
                 st.markdown("---")
     else:
         st.info("No match suggestions yet. Check back after matches are generated.")
+
+# ==========================================
+# MY PREFERENCES
+# ==========================================
+
+def show_preferences():
+    """Show and edit user's matching preferences"""
+    st.markdown('<div class="main-header">My Preferences</div>', unsafe_allow_html=True)
+
+    user_profile = st.session_state.user_profile
+    if not user_profile:
+        st.warning("Profile not found")
+        return
+
+    directory_service = DirectoryService(use_admin=True)
+
+    st.markdown("""
+    <div class="info-box">
+        <strong>Customize your match preferences</strong><br>
+        Set your category interests and partnership types to get more relevant match suggestions.
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("")
+
+    # Get current preferences (if available)
+    current_categories = user_profile.get('preferred_categories', [])
+    current_partnership_types = user_profile.get('preferred_partnership_types', [])
+
+    # Category preferences
+    st.markdown("### Category Interests")
+    st.caption("Select the categories you're interested in for potential partnerships")
+
+    selected_categories = st.multiselect(
+        "Categories",
+        [cat for cat in MATCH_CATEGORIES if cat != "All"],
+        default=current_categories if current_categories else [],
+        help="Choose categories that align with your business interests",
+        label_visibility="collapsed"
+    )
+
+    st.markdown("---")
+
+    # Partnership type preferences
+    st.markdown("### Partnership Types")
+    st.caption("Select the types of partnerships you're interested in")
+
+    partnership_types = ["affiliate", "speaking", "content collaboration", "referral", "joint venture", "sponsorship"]
+
+    selected_partnership_types = st.multiselect(
+        "Partnership Types",
+        partnership_types,
+        default=current_partnership_types if current_partnership_types else [],
+        help="Choose the types of partnerships you're open to",
+        label_visibility="collapsed"
+    )
+
+    st.markdown("---")
+
+    # Save button
+    col1, col2, col3 = st.columns([1, 1, 2])
+    with col1:
+        if st.button("Save Preferences", type="primary", use_container_width=True):
+            result = directory_service.update_profile_preferences(
+                user_profile['id'],
+                {
+                    'preferred_categories': selected_categories,
+                    'preferred_partnership_types': selected_partnership_types
+                }
+            )
+
+            if result.get('success'):
+                st.success("Preferences saved successfully!")
+                # Update session state
+                st.session_state.user_profile['preferred_categories'] = selected_categories
+                st.session_state.user_profile['preferred_partnership_types'] = selected_partnership_types
+                st.rerun()
+            else:
+                st.error("Failed to save preferences")
+
+    with col2:
+        if st.button("Reset", type="secondary", use_container_width=True):
+            st.rerun()
+
+    # Show current preferences summary
+    if selected_categories or selected_partnership_types:
+        st.markdown("---")
+        st.markdown("### Current Preferences")
+
+        if selected_categories:
+            st.markdown(f"**Categories:** {', '.join(selected_categories)}")
+
+        if selected_partnership_types:
+            st.markdown(f"**Partnership Types:** {', '.join(selected_partnership_types)}")
 
 # ==========================================
 # MY CONNECTIONS

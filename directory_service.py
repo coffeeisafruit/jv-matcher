@@ -4,7 +4,7 @@ Handles all profile/directory database operations
 Schema v2: contacts = profiles (unified)
 """
 import pandas as pd
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 from supabase_client import get_client, get_admin_client
 
 class DirectoryService:
@@ -296,6 +296,107 @@ class DirectoryService:
             return {"success": True}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def get_dismissed_profile_ids(self, profile_id: str) -> Set[str]:
+        """Get IDs of profiles this user has dismissed"""
+        try:
+            response = self.client.table("match_suggestions") \
+                .select("suggested_profile_id") \
+                .eq("profile_id", profile_id) \
+                .eq("status", "dismissed") \
+                .execute()
+            return {r['suggested_profile_id'] for r in response.data}
+        except Exception:
+            return set()
+
+    def dismiss_match(self, profile_id: str, suggested_profile_id: str) -> Dict[str, Any]:
+        """Mark a match as dismissed (won't appear again)"""
+        try:
+            # Check if match suggestion exists
+            existing = self.client.table("match_suggestions") \
+                .select("id") \
+                .eq("profile_id", profile_id) \
+                .eq("suggested_profile_id", suggested_profile_id) \
+                .execute()
+
+            if existing.data:
+                # Update existing record to dismissed
+                self.client.table("match_suggestions") \
+                    .update({"status": "dismissed"}) \
+                    .eq("id", existing.data[0]["id"]) \
+                    .execute()
+            else:
+                # Create new dismissed record
+                self.client.table("match_suggestions").insert({
+                    "profile_id": profile_id,
+                    "suggested_profile_id": suggested_profile_id,
+                    "status": "dismissed",
+                    "match_score": 0,
+                    "match_reason": "Dismissed by user",
+                    "source": "user_action"
+                }).execute()
+
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def update_profile_preferences(
+        self,
+        profile_id: str,
+        categories_interested: List[str],
+        partnership_types: List[str]
+    ) -> Dict[str, Any]:
+        """Save user preferences for matching"""
+        try:
+            # Check if preferences exist
+            existing = self.client.table("profile_preferences") \
+                .select("id") \
+                .eq("profile_id", profile_id) \
+                .execute()
+
+            preference_data = {
+                "categories_interested": categories_interested,
+                "partnership_types": partnership_types
+            }
+
+            if existing.data:
+                # Update existing preferences
+                self.client.table("profile_preferences") \
+                    .update(preference_data) \
+                    .eq("profile_id", profile_id) \
+                    .execute()
+            else:
+                # Create new preferences
+                preference_data["profile_id"] = profile_id
+                self.client.table("profile_preferences") \
+                    .insert(preference_data) \
+                    .execute()
+
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_profile_preferences(self, profile_id: str) -> Dict[str, Any]:
+        """Get user's saved preferences"""
+        try:
+            response = self.client.table("profile_preferences") \
+                .select("*") \
+                .eq("profile_id", profile_id) \
+                .single() \
+                .execute()
+            return {
+                "success": True,
+                "data": response.data
+            }
+        except Exception:
+            # Return default preferences if none exist
+            return {
+                "success": True,
+                "data": {
+                    "categories_interested": ["all"],
+                    "partnership_types": []
+                }
+            }
 
     # ==========================================
     # STATISTICS
