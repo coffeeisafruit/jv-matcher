@@ -1151,17 +1151,26 @@ def show_matches():
                         st.success("Message saved!")
 
                 # Contact button
-                if suggested.get('email'):
-                    subject = f"Partnership Opportunity - {user_profile.get('name', 'JV Directory')}"
-                    body = outreach_message if outreach_message else f"Hi {suggested.get('name', 'there')},\n\nI came across your profile and think we might have a great partnership opportunity..."
+                subject = f"Partnership Opportunity - {user_profile.get('name', 'JV Directory')}"
+                body = outreach_message if outreach_message else f"Hi {suggested.get('name', 'there')},\n\nI came across your profile and think we might have a great partnership opportunity..."
 
+                if suggested.get('email'):
                     mailto_link = f"mailto:{suggested['email']}?subject={urllib.parse.quote(subject)}&body={urllib.parse.quote(body)}"
 
-                    col_email, col_spacer = st.columns([1, 3])
+                    col_email, col_copy, col_spacer = st.columns([1, 1, 2])
                     with col_email:
-                        st.markdown(f'<a href="{mailto_link}" target="_blank"><button style="width:100%;padding:0.5rem;background-color:#4CAF50;color:white;border:none;border-radius:0.25rem;cursor:pointer;">Send Email</button></a>', unsafe_allow_html=True)
+                        st.markdown(f'<a href="{mailto_link}" target="_blank"><button style="width:100%;padding:0.5rem;background-color:#4CAF50;color:white;border:none;border-radius:0.25rem;cursor:pointer;">📧 Send Email</button></a>', unsafe_allow_html=True)
+                    with col_copy:
+                        if st.button("📋 Copy Message", key=f"copy_{match['id']}"):
+                            st.code(body, language=None)
+                            st.caption("Copy the message above")
                 else:
-                    st.info("Contact info not available")
+                    st.warning(f"No email on file for {suggested.get('name', 'this contact')}. Copy message and reach out via LinkedIn or their website.")
+                    col_copy, col_spacer = st.columns([1, 3])
+                    with col_copy:
+                        if st.button("📋 Copy Message", key=f"copy_{match['id']}"):
+                            st.code(body, language=None)
+                            st.caption("Copy the message above")
 
                 # Feedback buttons after contacted
                 if status == 'contacted':
