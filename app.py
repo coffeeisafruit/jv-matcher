@@ -962,6 +962,11 @@ def show_preferences():
 
     directory_service = DirectoryService(use_admin=True)
 
+    # Show success message if preferences were just saved
+    if st.session_state.get('preferences_saved'):
+        st.success("Preferences saved successfully!")
+        del st.session_state['preferences_saved']
+
     st.markdown("""
     <div class="info-box">
         <strong>Customize your match preferences</strong><br>
@@ -1016,10 +1021,10 @@ def show_preferences():
             )
 
             if result.get('success'):
-                st.success("Preferences saved successfully!")
                 # Update session state
                 st.session_state.user_profile['preferred_categories'] = selected_categories
                 st.session_state.user_profile['preferred_partnership_types'] = selected_partnership_types
+                st.session_state['preferences_saved'] = True
                 st.rerun()
             else:
                 st.error(f"Failed to save preferences: {result.get('error', 'Unknown error')}")
