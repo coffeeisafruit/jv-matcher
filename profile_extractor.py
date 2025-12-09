@@ -481,7 +481,7 @@ class AIProfileExtractor:
                 result = self.directory_service.get_profiles(limit=1)
                 if result["success"] and result["data"]:
                     for profile in result["data"]:
-                        if profile.get("email", "").lower() == email.lower():
+                        if (profile.get("email") or "").lower() == email.lower():
                             logger.info(f"Found exact email match: {profile['id']}")
                             return {
                                 "action": "update",
@@ -515,8 +515,8 @@ class AIProfileExtractor:
                     profile_name = (profile.get("name") or "").strip().lower()
                     profile_company = (profile.get("company") or "").strip().lower()
 
-                    if (self._normalize_name(profile_name) == self._normalize_name(name.lower()) and
-                        profile_company and company.lower() in profile_company):
+                    if (self._normalize_name(profile_name) == self._normalize_name((name or "").lower()) and
+                        profile_company and (company or "").lower() in profile_company):
                         logger.info(f"Found name+company match: {profile['id']}")
                         return {
                             "action": "update",
@@ -533,7 +533,7 @@ class AIProfileExtractor:
             # Strategy 3: Exact name match (70% confidence)
             for profile in profiles:
                 profile_name = (profile.get("name") or "").strip().lower()
-                if self._normalize_name(profile_name) == self._normalize_name(name.lower()):
+                if self._normalize_name(profile_name) == self._normalize_name((name or "").lower()):
                     logger.info(f"Found exact name match: {profile['id']}")
                     return {
                         "action": "review" if confidence_threshold > 70 else "update",
@@ -553,7 +553,7 @@ class AIProfileExtractor:
 
             for profile in profiles:
                 profile_name = (profile.get("name") or "").strip().lower()
-                similarity = self._fuzzy_match(self._normalize_name(name.lower()), self._normalize_name(profile_name))
+                similarity = self._fuzzy_match(self._normalize_name((name or "").lower()), self._normalize_name(profile_name))
 
                 if similarity > best_similarity and similarity >= 0.80:  # 80% string similarity
                     best_similarity = similarity
@@ -597,6 +597,8 @@ class AIProfileExtractor:
 
     def _normalize_name(self, name: str) -> str:
         """Normalize name for comparison (remove extra spaces, lowercase)"""
+        if not name:
+            return ""
         return " ".join(name.lower().strip().split())
 
     def _fuzzy_match(self, str1: str, str2: str) -> float:
