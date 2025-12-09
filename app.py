@@ -1842,12 +1842,14 @@ def show_generate_matches():
 
         with st.spinner("Generating matches... This may take a few minutes."):
             if use_hybrid:
-                status_text.text("Using smart matching with semantic analysis...")
-                generator = HybridMatchGenerator()
-                result = generator.generate_all_matches(
+                status_text.text("Using optimized two-stage matching (instant scores + background analysis)...")
+                # Use the new optimized ConversationAwareMatchGenerator
+                generator = ConversationAwareMatchGenerator()
+                result = generator.generate_matches_two_stage(
+                    profile_ids=None,  # All profiles
                     top_n=top_n,
                     min_score=float(min_score),
-                    only_registered=only_registered
+                    generate_rich_for_top_n=5  # Rich analysis for top 5 only
                 )
             else:
                 status_text.text("Using keyword matching...")
@@ -1862,11 +1864,19 @@ def show_generate_matches():
 
         if result['success']:
             st.success("Match generation complete!")
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             with col1:
                 st.metric("Profiles Processed", result['profiles_processed'])
             with col2:
                 st.metric("Matches Created", result['matches_created'])
+            with col3:
+                st.metric("Rich Analyses", result.get('rich_analyses_generated', 0))
+
+            # Show timing info if available
+            if result.get('total_time_seconds'):
+                st.info(f"Stage 1 (scoring): {result.get('stage1_time_seconds', 0)}s | "
+                       f"Stage 2 (analysis): {result.get('stage2_time_seconds', 0)}s | "
+                       f"Total: {result.get('total_time_seconds', 0)}s")
         else:
             st.error(f"Error: {result.get('error', 'Unknown error')}")
 
@@ -1886,21 +1896,20 @@ def show_generate_matches():
             )
 
             if st.button("Generate Matches for This User", type="secondary"):
-                generator = MatchGenerator()
-                with st.spinner(f"Generating matches for {selected_user['name']}..."):
-                    match_result = generator.generate_matches_for_user(
-                        selected_user['id'],
-                        top_n=top_n
+                generator = ConversationAwareMatchGenerator()
+                with st.spinner(f"Generating optimized matches for {selected_user['name']}..."):
+                    match_result = generator.generate_matches_two_stage(
+                        profile_ids=[selected_user['id']],
+                        top_n=top_n,
+                        generate_rich_for_top_n=5
                     )
 
                 if match_result['success']:
-                    st.success(f"Created {match_result['matches_created']} matches!")
+                    st.success(f"Created {match_result['matches_created']} matches with "
+                              f"{match_result.get('rich_analyses_generated', 0)} rich analyses!")
 
-                    if match_result.get('matches'):
-                        st.markdown("**Top Matches:**")
-                        for match in match_result['matches'][:5]:
-                            profile = match['profile']
-                            st.markdown(f"- **{profile.get('name')}** ({match['score']}%) - {match['reason']}")
+                    if match_result.get('total_time_seconds'):
+                        st.info(f"Completed in {match_result['total_time_seconds']}s")
                 else:
                     st.error(f"Error: {match_result.get('error')}")
 
