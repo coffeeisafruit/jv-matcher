@@ -2,13 +2,19 @@
 AI Profile Extractor for Rich JV Matching System
 Extracts structured profile data from transcripts and matches to existing profiles
 Supports chunked processing for large transcripts
+
+Features:
+- Chunk tracking and persistence for debugging/reprocessing
+- Error tracking (no silent fails)
+- Time-stamped profile field history
 """
 import os
 import re
 import json
 import logging
 import hashlib
-from typing import Dict, Any, List, Optional
+from datetime import datetime, date
+from typing import Dict, Any, List, Optional, Callable
 from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
@@ -44,6 +50,221 @@ class AIProfileExtractor:
         self.client = OpenAI(api_key=self.api_key)
         self.directory_service = DirectoryService(use_admin=True)
         self.supabase = get_admin_client()
+
+    # ============================================
+    # ERROR TRACKING METHODS
+    # ============================================
+
+    def _log_error(
+        self,
+        error_type: str,
+        error_message: str,
+        error_details: Dict = None,
+        transcript_id: str = None,
+        chunk_id: str = None,
+        profile_id: str = None
+    ) -> None:
+        """
+        Log an error to the processing_errors table - NO MORE SILENT FAILS
+        """
+        try:
+            error_data = {
+                "error_type": error_type,
+                "error_message": str(error_message)[:1000],  # Limit message length
+                "error_details": error_details or {},
+                "transcript_id": transcript_id,
+                "chunk_id": chunk_id,
+                "profile_id": profile_id,
+                "status": "new"
+            }
+            self.supabase.table("processing_errors").insert(error_data).execute()
+            logger.error(f"[TRACKED] {error_type}: {error_message}")
+        except Exception as e:
+            # If we can't even log the error, at least print it
+            logger.critical(f"Failed to log error to database: {e}")
+            logger.critical(f"Original error - {error_type}: {error_message}")
+
+    def get_unresolved_errors(self) -> List[Dict]:
+        """Get all unresolved processing errors"""
+        try:
+            result = self.supabase.table("processing_errors")\
+                .select("*")\
+                .eq("status", "new")\
+                .order("created_at", desc=True)\
+                .execute()
+            return result.data
+        except Exception as e:
+            logger.error(f"Failed to fetch errors: {e}")
+            return []
+
+    # ============================================
+    # CHUNK PERSISTENCE METHODS
+    # ============================================
+
+    def _save_chunk(
+        self,
+        transcript_id: str,
+        chunk_index: int,
+        chunk_text: str,
+        char_start: int = None,
+        char_end: int = None
+    ) -> Optional[str]:
+        """Save a chunk to the database and return its ID"""
+        try:
+            chunk_data = {
+                "transcript_id": transcript_id,
+                "chunk_index": chunk_index,
+                "chunk_text": chunk_text,
+                "char_start": char_start,
+                "char_end": char_end,
+                "status": "pending"
+            }
+            result = self.supabase.table("transcript_chunks").insert(chunk_data).execute()
+            return result.data[0]["id"] if result.data else None
+        except Exception as e:
+            self._log_error(
+                "chunk_save_failed",
+                f"Failed to save chunk {chunk_index}: {e}",
+                {"chunk_index": chunk_index, "transcript_id": transcript_id}
+            )
+            return None
+
+    def _update_chunk_status(
+        self,
+        chunk_id: str,
+        status: str,
+        profiles_extracted: int = 0,
+        error_message: str = None
+    ) -> None:
+        """Update chunk processing status"""
+        try:
+            update_data = {
+                "status": status,
+                "profiles_extracted": profiles_extracted,
+                "processed_at": datetime.utcnow().isoformat()
+            }
+            if error_message:
+                update_data["error_message"] = error_message
+            if status == "failed":
+                # Increment retry count
+                self.supabase.table("transcript_chunks")\
+                    .update({**update_data, "retry_count": self.supabase.rpc("increment_retry", {"chunk_id": chunk_id})})\
+                    .eq("id", chunk_id)\
+                    .execute()
+            else:
+                self.supabase.table("transcript_chunks")\
+                    .update(update_data)\
+                    .eq("id", chunk_id)\
+                    .execute()
+        except Exception as e:
+            logger.error(f"Failed to update chunk status: {e}")
+
+    # ============================================
+    # PROFILE FIELD HISTORY METHODS
+    # ============================================
+
+    def _save_field_history(
+        self,
+        profile_id: str,
+        field_name: str,
+        field_value: str,
+        event_date: date = None,
+        event_name: str = None,
+        transcript_id: str = None,
+        chunk_id: str = None,
+        timestamp_in_transcript: str = None,
+        confidence: float = None
+    ) -> None:
+        """Save a profile field update to history for time-based matching"""
+        try:
+            history_data = {
+                "profile_id": profile_id,
+                "field_name": field_name,
+                "field_value": field_value,
+                "event_date": event_date.isoformat() if event_date else None,
+                "event_name": event_name,
+                "transcript_id": transcript_id,
+                "chunk_id": chunk_id,
+                "timestamp_in_transcript": timestamp_in_transcript,
+                "confidence": confidence
+            }
+            self.supabase.table("profile_field_history").insert(history_data).execute()
+            logger.debug(f"Saved field history: {field_name} for profile {profile_id}")
+        except Exception as e:
+            self._log_error(
+                "field_history_save_failed",
+                f"Failed to save field history: {e}",
+                {"profile_id": profile_id, "field_name": field_name},
+                profile_id=profile_id
+            )
+
+    def get_profile_field_history(self, profile_id: str, field_name: str = None) -> List[Dict]:
+        """Get the history of a profile's field changes with dates"""
+        try:
+            query = self.supabase.table("profile_field_history")\
+                .select("*")\
+                .eq("profile_id", profile_id)
+
+            if field_name:
+                query = query.eq("field_name", field_name)
+
+            result = query.order("event_date", desc=True).execute()
+            return result.data
+        except Exception as e:
+            logger.error(f"Failed to fetch field history: {e}")
+            return []
+
+    # ============================================
+    # TRANSCRIPT PERSISTENCE METHODS
+    # ============================================
+
+    def save_transcript(
+        self,
+        filename: str,
+        content: str,
+        event_name: str = None,
+        event_date = None
+    ) -> Optional[str]:
+        """
+        Save a transcript to the database and return its ID.
+        This must be called BEFORE processing to enable chunk tracking.
+        """
+        try:
+            transcript_data = {
+                "file_name": filename,
+                "content": content,
+                "event_name": event_name,
+                "event_date": str(event_date) if event_date else None,
+                "status": "processing"
+            }
+            result = self.supabase.table("conversation_transcripts").insert(transcript_data).execute()
+
+            if result.data:
+                transcript_id = result.data[0]["id"]
+                logger.info(f"Saved transcript {filename} with ID: {transcript_id}")
+                return transcript_id
+            return None
+        except Exception as e:
+            self._log_error(
+                "transcript_save",
+                f"Failed to save transcript {filename}: {str(e)}",
+                {"filename": filename, "error": str(e)}
+            )
+            return None
+
+    def update_transcript_status(self, transcript_id: str, status: str, profiles_extracted: int = None) -> None:
+        """Update the status of a transcript after processing"""
+        try:
+            update_data = {"status": status}
+            if profiles_extracted is not None:
+                update_data["profiles_extracted"] = profiles_extracted
+
+            self.supabase.table("conversation_transcripts")\
+                .update(update_data)\
+                .eq("id", transcript_id)\
+                .execute()
+        except Exception as e:
+            logger.error(f"Failed to update transcript status: {e}")
 
     def extract_profile_from_transcript(self, transcript_text: str) -> Dict[str, Any]:
         """
@@ -115,23 +336,35 @@ class AIProfileExtractor:
     def extract_all_profiles_from_transcript(
         self,
         transcript_text: str,
-        progress_callback: Optional[callable] = None
+        progress_callback: Optional[Callable] = None,
+        transcript_id: str = None,
+        event_date: date = None,
+        event_name: str = None
     ) -> Dict[str, Any]:
         """
         Extract ALL profiles from a transcript (handles large multi-speaker transcripts)
 
         This method:
         1. Splits large transcripts into chunks
-        2. Extracts profiles from each chunk IN PARALLEL
-        3. Merges and deduplicates results
+        2. SAVES each chunk to database for tracking
+        3. Extracts profiles from each chunk IN PARALLEL
+        4. TRACKS errors (no silent fails)
+        5. Merges and deduplicates results
+        6. Records timestamps for time-based matching
 
         Args:
             transcript_text: The raw transcript text (any size)
             progress_callback: Optional callback(current, total, message) for progress updates
+            transcript_id: ID of the transcript in conversation_transcripts table
+            event_date: Date of the networking event (for time-based matching)
+            event_name: Name of the event (e.g., "JV Mastermind December 2025")
 
         Returns:
             Dict containing list of all extracted profiles
         """
+        failed_chunks = []
+        successful_chunks = []
+
         try:
             logger.info(f"Extracting all profiles from transcript ({len(transcript_text)} chars)")
 
@@ -140,7 +373,32 @@ class AIProfileExtractor:
                 # Small transcript - extract multiple profiles in one call
                 if progress_callback:
                     progress_callback(1, 1, "Processing transcript...")
-                return self._extract_multiple_profiles(transcript_text)
+
+                # Save as single chunk if we have a transcript_id
+                chunk_id = None
+                if transcript_id:
+                    chunk_id = self._save_chunk(transcript_id, 0, transcript_text, 0, len(transcript_text))
+
+                result = self._extract_multiple_profiles(transcript_text)
+
+                # Update chunk status
+                if chunk_id:
+                    if result.get("success"):
+                        self._update_chunk_status(chunk_id, "success", len(result.get("profiles", [])))
+                        successful_chunks.append({"chunk_id": chunk_id, "index": 0})
+                    else:
+                        self._update_chunk_status(chunk_id, "failed", 0, result.get("error"))
+                        failed_chunks.append({"chunk_id": chunk_id, "index": 0, "error": result.get("error")})
+
+                # Add event metadata to profiles
+                if result.get("success") and result.get("profiles"):
+                    for profile in result["profiles"]:
+                        profile["_event_date"] = event_date
+                        profile["_event_name"] = event_name
+                        profile["_transcript_id"] = transcript_id
+                        profile["_chunk_id"] = chunk_id
+
+                return result
 
             # Large transcript - chunk and process in parallel
             chunks = self._chunk_transcript(transcript_text)
@@ -150,6 +408,23 @@ class AIProfileExtractor:
             if progress_callback:
                 progress_callback(0, total_chunks, f"Split into {total_chunks} chunks, processing {MAX_PARALLEL_CHUNKS} in parallel...")
 
+            # Save all chunks to database BEFORE processing
+            chunk_records = []
+            char_position = 0
+            for i, chunk in enumerate(chunks):
+                chunk_id = None
+                if transcript_id:
+                    chunk_id = self._save_chunk(
+                        transcript_id, i, chunk,
+                        char_position, char_position + len(chunk)
+                    )
+                chunk_records.append({
+                    "index": i,
+                    "chunk_id": chunk_id,
+                    "text": chunk
+                })
+                char_position += len(chunk)
+
             all_profiles = []
             completed = 0
 
@@ -157,26 +432,71 @@ class AIProfileExtractor:
             with ThreadPoolExecutor(max_workers=MAX_PARALLEL_CHUNKS) as executor:
                 # Submit all chunks for processing
                 future_to_chunk = {
-                    executor.submit(self._extract_multiple_profiles, chunk): i
-                    for i, chunk in enumerate(chunks)
+                    executor.submit(self._extract_multiple_profiles, rec["text"]): rec
+                    for rec in chunk_records
                 }
 
                 # Collect results as they complete
                 for future in as_completed(future_to_chunk):
-                    chunk_idx = future_to_chunk[future]
+                    chunk_rec = future_to_chunk[future]
+                    chunk_idx = chunk_rec["index"]
+                    chunk_id = chunk_rec["chunk_id"]
                     completed += 1
 
                     try:
                         result = future.result()
                         if result.get("success") and result.get("profiles"):
+                            # Add event metadata to each profile
+                            for profile in result["profiles"]:
+                                profile["_event_date"] = event_date
+                                profile["_event_name"] = event_name
+                                profile["_transcript_id"] = transcript_id
+                                profile["_chunk_id"] = chunk_id
+
                             all_profiles.extend(result["profiles"])
                             logger.info(f"Chunk {chunk_idx+1}: Found {len(result['profiles'])} profiles")
+
+                            # Update chunk status to success
+                            if chunk_id:
+                                self._update_chunk_status(chunk_id, "success", len(result["profiles"]))
+                                successful_chunks.append({"chunk_id": chunk_id, "index": chunk_idx})
+                        else:
+                            # Chunk returned no profiles or failed
+                            error_msg = result.get("error", "No profiles found")
+                            if chunk_id:
+                                self._update_chunk_status(chunk_id, "failed", 0, error_msg)
+                            failed_chunks.append({"chunk_id": chunk_id, "index": chunk_idx, "error": error_msg})
+
+                            # LOG THE ERROR - no silent fails!
+                            self._log_error(
+                                "chunk_extraction_failed",
+                                f"Chunk {chunk_idx+1} failed: {error_msg}",
+                                {"chunk_index": chunk_idx, "profiles_found": 0},
+                                transcript_id=transcript_id,
+                                chunk_id=chunk_id
+                            )
 
                         if progress_callback:
                             progress_callback(completed, total_chunks,
                                 f"Completed {completed}/{total_chunks} chunks (Found {len(all_profiles)} profiles)")
+
                     except Exception as e:
-                        logger.error(f"Chunk {chunk_idx+1} failed: {e}")
+                        # TRACK THE ERROR - no silent fails!
+                        error_msg = str(e)
+                        logger.error(f"Chunk {chunk_idx+1} failed: {error_msg}")
+
+                        if chunk_id:
+                            self._update_chunk_status(chunk_id, "failed", 0, error_msg)
+
+                        failed_chunks.append({"chunk_id": chunk_id, "index": chunk_idx, "error": error_msg})
+
+                        self._log_error(
+                            "chunk_extraction_exception",
+                            f"Chunk {chunk_idx+1} threw exception: {error_msg}",
+                            {"chunk_index": chunk_idx, "exception_type": type(e).__name__},
+                            transcript_id=transcript_id,
+                            chunk_id=chunk_id
+                        )
 
             # Deduplicate profiles by name similarity
             if progress_callback:
@@ -185,20 +505,38 @@ class AIProfileExtractor:
             unique_profiles = self._deduplicate_profiles(all_profiles)
             logger.info(f"Extracted {len(unique_profiles)} unique profiles from {len(all_profiles)} total")
 
+            # Report on failed chunks
+            if failed_chunks:
+                logger.warning(f"WARNING: {len(failed_chunks)} chunks failed processing. Check processing_errors table.")
+
             return {
                 "success": True,
                 "profiles": unique_profiles,
                 "total_extracted": len(all_profiles),
                 "unique_count": len(unique_profiles),
-                "chunks_processed": total_chunks
+                "chunks_processed": total_chunks,
+                "chunks_successful": len(successful_chunks),
+                "chunks_failed": len(failed_chunks),
+                "failed_chunk_details": failed_chunks if failed_chunks else None
             }
 
         except Exception as e:
-            logger.error(f"Error extracting all profiles: {str(e)}")
+            error_msg = str(e)
+            logger.error(f"Error extracting all profiles: {error_msg}")
+
+            # LOG THE ERROR
+            self._log_error(
+                "extraction_pipeline_failed",
+                f"Full extraction pipeline failed: {error_msg}",
+                {"transcript_length": len(transcript_text)},
+                transcript_id=transcript_id
+            )
+
             return {
                 "success": False,
-                "error": str(e),
-                "profiles": []
+                "error": error_msg,
+                "profiles": [],
+                "failed_chunk_details": failed_chunks if failed_chunks else None
             }
 
     def _chunk_transcript(self, text: str) -> List[str]:
@@ -379,6 +717,7 @@ class AIProfileExtractor:
         """
         Merge data from source profile into target profile
         Prefers existing non-null values but fills in gaps
+        Also preserves event metadata for time-based matching
 
         Args:
             target: Profile to merge into (modified in place)
@@ -406,6 +745,32 @@ class AIProfileExtractor:
 
         # Update confidence to max
         target["confidence"] = max(target.get("confidence", 0), source.get("confidence", 0))
+
+        # Preserve event metadata - collect all events this profile appeared in
+        if "_events" not in target:
+            target["_events"] = []
+
+        # Add target's original event if it has one
+        if target.get("_event_date") or target.get("_event_name"):
+            existing_event = {
+                "event_date": target.get("_event_date"),
+                "event_name": target.get("_event_name"),
+                "transcript_id": target.get("_transcript_id"),
+                "chunk_id": target.get("_chunk_id")
+            }
+            if existing_event not in target["_events"]:
+                target["_events"].append(existing_event)
+
+        # Add source's event
+        if source.get("_event_date") or source.get("_event_name"):
+            source_event = {
+                "event_date": source.get("_event_date"),
+                "event_name": source.get("_event_name"),
+                "transcript_id": source.get("_transcript_id"),
+                "chunk_id": source.get("_chunk_id")
+            }
+            if source_event not in target["_events"]:
+                target["_events"].append(source_event)
 
     def _calculate_extraction_confidence(self, profile_data: Dict[str, Any]) -> float:
         """

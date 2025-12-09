@@ -270,15 +270,18 @@ class DirectoryService:
         match_reason: str,
         source: str = "ai_matcher"
     ) -> Dict[str, Any]:
-        """Create a new match suggestion"""
+        """Create or update a match suggestion (upsert to avoid duplicates)"""
         try:
-            self.client.table("match_suggestions").insert({
-                "profile_id": profile_id,
-                "suggested_profile_id": suggested_profile_id,
-                "match_score": match_score,
-                "match_reason": match_reason,
-                "source": source
-            }).execute()
+            self.client.table("match_suggestions").upsert(
+                {
+                    "profile_id": profile_id,
+                    "suggested_profile_id": suggested_profile_id,
+                    "match_score": match_score,
+                    "match_reason": match_reason,
+                    "source": source
+                },
+                on_conflict="profile_id,suggested_profile_id"
+            ).execute()
             return {"success": True}
         except Exception as e:
             return {"success": False, "error": str(e)}

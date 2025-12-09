@@ -732,12 +732,23 @@ def show_process_transcripts():
 
     st.markdown("")
 
-    # Event name input
-    event_name = st.text_input(
-        "Event Name (optional)",
-        placeholder="e.g., JV Mastermind December 2025",
-        help="Name of the networking event for tracking"
-    )
+    # Event metadata inputs
+    col_event1, col_event2 = st.columns(2)
+
+    with col_event1:
+        event_name = st.text_input(
+            "Event Name (optional)",
+            placeholder="e.g., JV Mastermind December 2025",
+            help="Name of the networking event for tracking"
+        )
+
+    with col_event2:
+        from datetime import date
+        event_date = st.date_input(
+            "Event Date (optional)",
+            value=None,
+            help="Date when the networking event occurred - enables time-based matching"
+        )
 
     # File uploader
     uploaded_files = st.file_uploader(
@@ -777,20 +788,51 @@ def show_process_transcripts():
         # Process button
         st.markdown("")
         if st.button("Process Files", type="primary", use_container_width=True):
-            process_transcripts_with_database(uploaded_files, matches_per_person, save_to_database, event_name)
+            process_transcripts_with_database(uploaded_files, matches_per_person, save_to_database, event_name, event_date)
 
     else:
         st.info("Upload one or more transcript files to get started")
 
-def process_transcripts_with_database(uploaded_files, matches_per_person, save_to_database, event_name=None):
+def process_transcripts_with_database(uploaded_files, matches_per_person, save_to_database, event_name=None, event_date=None):
     """Process transcripts using AI-powered extraction with conversation analysis"""
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+    import time
+    start_time = time.time()
+
+    # Create a more engaging progress display
+    progress_container = st.container()
+    with progress_container:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        substatus_text = st.empty()  # For detailed sub-status
+        encouragement_text = st.empty()  # For encouraging messages
+
     results_container = st.empty()
+
+    # Encouraging messages to keep users engaged
+    encouragement_messages = [
+        "☕ This is a great time to grab a coffee...",
+        "🧠 Our AI is carefully reading every conversation...",
+        "🔍 Finding the best partnership opportunities for everyone...",
+        "✨ Great things take time - we're almost there!",
+        "🤝 Building connections that matter...",
+        "📊 Analyzing business compatibility scores...",
+        "🎯 Matching seekers with providers...",
+        "💡 Discovering hidden collaboration opportunities...",
+        "🚀 Preparing personalized recommendations...",
+    ]
+    current_encouragement = 0
+
+    def update_encouragement():
+        nonlocal current_encouragement
+        elapsed = time.time() - start_time
+        # Change message every 15 seconds
+        msg_index = int(elapsed / 15) % len(encouragement_messages)
+        encouragement_text.markdown(f"*{encouragement_messages[msg_index]}*")
 
     try:
         # Initialize services
-        status_text.text("Initializing AI services...")
+        status_text.markdown("### 🔧 Initializing AI services...")
+        substatus_text.text("Loading OpenAI and Supabase connections...")
         progress_bar.progress(5)
 
         directory_service = DirectoryService(use_admin=True)
@@ -799,7 +841,9 @@ def process_transcripts_with_database(uploaded_files, matches_per_person, save_t
         match_generator = ConversationAwareMatchGenerator()  # Use conversation-aware matcher
 
         # Read transcript content from uploaded files
-        status_text.text("Reading transcript files...")
+        status_text.markdown("### 📄 Reading transcript files...")
+        substatus_text.text(f"Processing {len(uploaded_files)} file(s)...")
+        update_encouragement()
         progress_bar.progress(10)
 
         transcripts = []
@@ -821,11 +865,24 @@ def process_transcripts_with_database(uploaded_files, matches_per_person, save_t
 
         for i, transcript in enumerate(transcripts):
             base_progress = 15 + int((i / total_transcripts) * 50)
-            status_text.text(f"AI extracting ALL profiles from {transcript['filename']} (chunking large files)...")
+            file_num = i + 1
+            status_text.markdown(f"### 🤖 Extracting Profiles ({file_num}/{total_transcripts})")
+            substatus_text.text(f"Processing: {transcript['filename']}")
+            update_encouragement()
             progress_bar.progress(base_progress)
 
-            # Create progress callback for real-time updates
-            def make_progress_callback(base_pct, file_name, status_elem, progress_elem):
+            # Save transcript to database first to get ID for chunk tracking
+            transcript_id = None
+            if save_to_database and SUPABASE_AVAILABLE:
+                transcript_id = profile_extractor.save_transcript(
+                    filename=transcript['filename'],
+                    content=transcript['content'],
+                    event_name=event_name,
+                    event_date=event_date
+                )
+
+            # Create progress callback for real-time updates with encouragement
+            def make_progress_callback(base_pct, file_name, status_elem, substatus_elem, progress_elem, encourage_func):
                 def callback(current, total, message):
                     if total > 0:
                         chunk_progress = current / total
@@ -833,19 +890,26 @@ def process_transcripts_with_database(uploaded_files, matches_per_person, save_t
                         file_progress = chunk_progress * (50 / max(total_transcripts, 1))
                         new_pct = min(65, base_pct + int(file_progress))
                         progress_elem.progress(new_pct)
-                    status_elem.text(f"{file_name}: {message}")
+                    substatus_elem.text(f"{file_name}: {message}")
+                    encourage_func()  # Update encouragement message
                 return callback
 
-            chunk_callback = make_progress_callback(base_progress, transcript['filename'], status_text, progress_bar)
+            chunk_callback = make_progress_callback(base_progress, transcript['filename'], status_text, substatus_text, progress_bar, update_encouragement)
 
             # Use AI to extract ALL profiles from transcript (handles large files via chunking)
             extraction_result = profile_extractor.extract_all_profiles_from_transcript(
                 transcript['content'],
-                progress_callback=chunk_callback
+                progress_callback=chunk_callback,
+                transcript_id=transcript_id,
+                event_date=event_date,
+                event_name=event_name
             )
 
             if not extraction_result.get('success'):
                 st.warning(f"Could not extract profiles from {transcript['filename']}: {extraction_result.get('error', 'Unknown error')}")
+                # Update transcript status to failed
+                if transcript_id:
+                    profile_extractor.update_transcript_status(transcript_id, "failed", 0)
                 continue
 
             # Get list of all extracted profiles
@@ -854,9 +918,16 @@ def process_transcripts_with_database(uploaded_files, matches_per_person, save_t
 
             if not profiles_list:
                 st.warning(f"No valid profiles found in {transcript['filename']}")
+                # Update transcript status to completed with 0 profiles
+                if transcript_id:
+                    profile_extractor.update_transcript_status(transcript_id, "completed", 0)
                 continue
 
             st.info(f"Found {len(profiles_list)} profiles in {transcript['filename']} ({chunks_processed} chunks processed)")
+
+            # Update transcript status to completed with profile count
+            if transcript_id:
+                profile_extractor.update_transcript_status(transcript_id, "completed", len(profiles_list))
 
             # Process each extracted profile
             for extracted_data in profiles_list:
@@ -935,7 +1006,8 @@ def process_transcripts_with_database(uploaded_files, matches_per_person, save_t
 
                     # Generate matches for new/updated profiles
                     if profile_id and action in ['create', 'update']:
-                        status_text.text(f"Generating matches for {extracted_data.get('name')}...")
+                        substatus_text.text(f"Finding matches for {extracted_data.get('name')}...")
+                        update_encouragement()
                         try:
                             gen_result = match_generator.generate_matches_for_user(
                                 profile_id,
@@ -952,12 +1024,15 @@ def process_transcripts_with_database(uploaded_files, matches_per_person, save_t
         total_topics = 0
         total_signals = 0
 
-        status_text.text("Analyzing conversation signals...")
+        status_text.markdown("### 💬 Analyzing Conversations...")
+        substatus_text.text("Extracting topics and connection signals...")
+        update_encouragement()
         progress_bar.progress(70)
 
         for i, transcript in enumerate(transcripts):
             progress_pct = 70 + int((i / total_transcripts) * 15)
-            status_text.text(f"Extracting conversation signals from {transcript['filename']}...")
+            substatus_text.text(f"Analyzing: {transcript['filename']}...")
+            update_encouragement()
             progress_bar.progress(progress_pct)
 
             try:
@@ -987,7 +1062,9 @@ def process_transcripts_with_database(uploaded_files, matches_per_person, save_t
 
         # After adding new profiles, regenerate matches for ALL existing users
         if profiles_created > 0 or profiles_updated > 0:
-            status_text.text("Regenerating matches for all users with conversation intelligence...")
+            status_text.markdown("### 🎯 Generating Partnership Matches...")
+            substatus_text.text("This is the most important step - finding the best connections for everyone!")
+            update_encouragement()
             progress_bar.progress(87)
 
             # Get all existing profiles to regenerate their matches
@@ -1009,8 +1086,9 @@ def process_transcripts_with_database(uploaded_files, matches_per_person, save_t
                             )
                             users_updated += 1
                             # Update progress
-                            progress_pct = 92 + int((idx / total_users) * 6)
-                            status_text.text(f"Updating matches: {users_updated}/{total_users} users...")
+                            progress_pct = 87 + int((idx / total_users) * 11)
+                            substatus_text.text(f"Matching user {users_updated} of {total_users}: {user_profile.get('name', 'Unknown')}...")
+                            update_encouragement()
                             progress_bar.progress(min(progress_pct, 98))
                         except Exception as user_match_error:
                             pass  # Skip errors for individual users
@@ -1018,15 +1096,29 @@ def process_transcripts_with_database(uploaded_files, matches_per_person, save_t
                 matches_generated += users_updated * matches_per_person  # Approximate
 
         progress_bar.progress(99)
-        status_text.text("Finalizing...")
+        status_text.markdown("### ✅ Finalizing...")
+        substatus_text.text("Wrapping up and preparing your results...")
 
         # Show results
         progress_bar.progress(100)
-        status_text.text("Complete!")
+        elapsed_time = time.time() - start_time
+        elapsed_min = int(elapsed_time // 60)
+        elapsed_sec = int(elapsed_time % 60)
 
-        st.markdown("""
+        # Clear the encouragement text
+        encouragement_text.empty()
+        substatus_text.empty()
+        status_text.empty()
+
+        if elapsed_min > 0:
+            time_str = f"{elapsed_min} min {elapsed_sec} sec"
+        else:
+            time_str = f"{elapsed_sec} seconds"
+
+        st.markdown(f"""
         <div class="success-box">
             <h3>✅ AI Processing Complete!</h3>
+            <p>Completed in {time_str}</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1115,9 +1207,97 @@ def process_transcripts_with_database(uploaded_files, matches_per_person, save_t
                             else:
                                 st.markdown(f"- ℹ️ **{speaker}**: {text}")
 
+        # ==========================================
+        # TOP CONNECTIONS DISCOVERED - Show to Admin
+        # ==========================================
+        if matches_generated > 0:
+            st.markdown("---")
+            st.markdown("### 🤝 Top Connections Discovered")
+            st.markdown("*Here are some of the best matches we found from this transcript:*")
+
+            # Fetch top matches across all profiles
+            try:
+                top_matches_query = directory_service.supabase.table("match_suggestions") \
+                    .select("*, profile:profile_id(name, company), suggested:suggested_profile_id(name, company)") \
+                    .order("match_score", desc=True) \
+                    .limit(15) \
+                    .execute()
+
+                top_connections = top_matches_query.data if top_matches_query.data else []
+
+                if top_connections:
+                    # Group by unique pairs to avoid showing A→B and B→A
+                    shown_pairs = set()
+                    connections_shown = 0
+
+                    for conn in top_connections:
+                        if connections_shown >= 10:
+                            break
+
+                        profile = conn.get('profile', {}) or {}
+                        suggested = conn.get('suggested', {}) or {}
+                        profile_name = profile.get('name', 'Unknown')
+                        suggested_name = suggested.get('name', 'Unknown')
+                        score = conn.get('match_score', 0)
+                        reason = conn.get('match_reason', '')[:150]
+
+                        # Create a unique pair key (sorted to catch both directions)
+                        pair_key = tuple(sorted([profile_name, suggested_name]))
+                        if pair_key in shown_pairs:
+                            continue
+                        shown_pairs.add(pair_key)
+
+                        # Display the connection
+                        with st.expander(f"**{profile_name}** ↔ **{suggested_name}** — Score: {score}/100"):
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.markdown(f"**{profile_name}**")
+                                if profile.get('company'):
+                                    st.caption(profile['company'])
+                            with col2:
+                                st.markdown(f"**{suggested_name}**")
+                                if suggested.get('company'):
+                                    st.caption(suggested['company'])
+
+                            if reason:
+                                st.markdown(f"**Why they match:** {reason}")
+
+                            # Show match context if available
+                            match_context = conn.get('match_context')
+                            if match_context:
+                                try:
+                                    if isinstance(match_context, str):
+                                        context = json.loads(match_context)
+                                    else:
+                                        context = match_context
+
+                                    if context.get('seeker_mentioned') or context.get('match_offering'):
+                                        st.markdown("**When topics were mentioned:**")
+                                        if context.get('seeker_mentioned'):
+                                            seeking = context['seeker_mentioned']
+                                            event_info = seeking.get('event_name') or seeking.get('event_date') or 'recently'
+                                            st.markdown(f"- {profile_name} mentioned seeking: \"{seeking.get('value', '')[:100]}\" ({event_info})")
+                                        if context.get('match_offering'):
+                                            offering = context['match_offering']
+                                            event_info = offering.get('event_name') or offering.get('event_date') or 'recently'
+                                            st.markdown(f"- {suggested_name} mentioned offering: \"{offering.get('value', '')[:100]}\" ({event_info})")
+                                except:
+                                    pass
+
+                        connections_shown += 1
+
+                    if connections_shown > 0:
+                        st.success(f"Showing top {connections_shown} connections. Each person can see their full match list in 'My Matches'.")
+                else:
+                    st.info("Matches are being generated. They'll appear in each user's 'My Matches' page.")
+
+            except Exception as conn_error:
+                st.info(f"Matches have been generated. View them in 'My Matches' for each user.")
+
         # Next steps
         if profiles_created > 0 or profiles_updated > 0 or total_signals > 0:
-            st.markdown("### Next Steps")
+            st.markdown("---")
+            st.markdown("### 📋 Next Steps")
             st.markdown("1. Go to **My Matches** to see AI-generated match recommendations")
             st.markdown("2. Matches now include **conversation signals** for better partner suggestions")
             st.markdown("3. Review match analysis and use the Send Email button to connect")
@@ -1428,6 +1608,52 @@ def show_matches():
                 if match.get('match_reason') and not rich_analysis:
                     st.markdown("---")
                     st.markdown(f"**Why this match:** {match['match_reason']}")
+
+                # Time-based match context - show when topics were mentioned
+                match_context = match.get('match_context')
+                if match_context:
+                    try:
+                        if isinstance(match_context, str):
+                            context = json.loads(match_context)
+                        else:
+                            context = match_context
+
+                        if context:
+                            st.markdown("---")
+                            st.markdown("### When Topics Were Mentioned")
+
+                            # Show what the match is offering and when
+                            if context.get('match_offering'):
+                                offering = context['match_offering']
+                                event_info = offering.get('event_name') or offering.get('event_date') or 'a recent event'
+                                if offering.get('event_date') and offering.get('event_name'):
+                                    event_info = f"{offering['event_name']} ({offering['event_date']})"
+                                elif offering.get('event_date'):
+                                    event_info = offering['event_date']
+                                st.markdown(f"**{suggested.get('name', 'They')} mentioned offering:** \"{offering.get('value', '')}\" at {event_info}")
+
+                            # Show what_you_do from match
+                            if context.get('match_described'):
+                                described = context['match_described']
+                                event_info = described.get('event_name') or described.get('event_date') or 'a recent event'
+                                if described.get('event_date') and described.get('event_name'):
+                                    event_info = f"{described['event_name']} ({described['event_date']})"
+                                elif described.get('event_date'):
+                                    event_info = described['event_date']
+                                st.markdown(f"**{suggested.get('name', 'They')} described their work:** \"{described.get('value', '')}\" at {event_info}")
+
+                            # Show what you (the seeker) mentioned seeking
+                            if context.get('seeker_mentioned'):
+                                seeking = context['seeker_mentioned']
+                                event_info = seeking.get('event_name') or seeking.get('event_date') or 'a recent event'
+                                if seeking.get('event_date') and seeking.get('event_name'):
+                                    event_info = f"{seeking['event_name']} ({seeking['event_date']})"
+                                elif seeking.get('event_date'):
+                                    event_info = seeking['event_date']
+                                st.markdown(f"**You mentioned seeking:** \"{seeking.get('value', '')}\" at {event_info}")
+
+                    except (json.JSONDecodeError, TypeError):
+                        pass
 
                 # Get outreach message - prefer saved, then from analysis, then generate default
                 default_outreach = ""
@@ -2085,3 +2311,4 @@ def show_help():
 
 if __name__ == "__main__":
     main()
+

@@ -1017,6 +1017,7 @@ class ConversationAwareMatchGenerator(HybridMatchGenerator):
         self._signals_by_profile = {}  # profile_id -> [signals]
         self._signals_by_target = {}   # target_profile_id -> [signals from others targeting this profile]
         self._transcripts_by_profile = {}  # profile_id -> {transcript_ids}
+        self._field_history_by_profile = {}  # profile_id -> {field_name -> [history records]}
         self._conversation_data_loaded = False
 
     def _prefetch_conversation_data(self, profile_ids: List[str] = None) -> None:
@@ -1106,9 +1107,44 @@ class ConversationAwareMatchGenerator(HybridMatchGenerator):
                     self._transcripts_by_profile[pid] = set()
                 self._transcripts_by_profile[pid].add(speaker.get('transcript_id'))
 
+        # Query 3: Profile field history (for time-based matching context)
+        try:
+            if profile_ids:
+                all_field_history = []
+                for i in range(0, len(profile_ids), batch_size):
+                    batch = profile_ids[i:i + batch_size]
+                    history_response = supabase.table("profile_field_history") \
+                        .select("profile_id, field_name, field_value, event_date, event_name") \
+                        .in_("profile_id", batch) \
+                        .execute()
+                    all_field_history.extend(history_response.data or [])
+            else:
+                history_response = supabase.table("profile_field_history") \
+                    .select("profile_id, field_name, field_value, event_date, event_name") \
+                    .execute()
+                all_field_history = history_response.data or []
+
+            print(f"  Loaded {len(all_field_history)} field history records")
+        except Exception as e:
+            print(f"  Note: Field history not available yet: {e}")
+            all_field_history = []
+
+        # Index field history by profile
+        self._field_history_by_profile = {}
+        for record in all_field_history:
+            pid = record.get('profile_id')
+            field_name = record.get('field_name')
+            if pid and field_name:
+                if pid not in self._field_history_by_profile:
+                    self._field_history_by_profile[pid] = {}
+                if field_name not in self._field_history_by_profile[pid]:
+                    self._field_history_by_profile[pid][field_name] = []
+                self._field_history_by_profile[pid][field_name].append(record)
+
         self._conversation_data_loaded = True
         print(f"  Indexed: {len(self._signals_by_profile)} profiles with signals, "
-              f"{len(self._transcripts_by_profile)} profiles in conversations")
+              f"{len(self._transcripts_by_profile)} profiles in conversations, "
+              f"{len(self._field_history_by_profile)} profiles with field history")
 
     def get_affected_profiles_bidirectional(self, new_profile_ids: List[str]) -> Set[str]:
         """
@@ -1341,6 +1377,76 @@ class ConversationAwareMatchGenerator(HybridMatchGenerator):
 
         return round(total_score, 1), component_scores, list(common_keywords)[:5], collaboration_idea
 
+    def _build_match_context(self, seeker_profile_id: str, match_profile_id: str) -> Optional[Dict]:
+        """
+        Build time-based match context showing when each person mentioned relevant topics.
+
+        This enables displays like:
+        "Ken mentioned publishing work at the January event"
+        "Sarah mentioned seeking a publisher at the March event"
+
+        Returns:
+            Dict with seeker and match context, or None if no history available
+        """
+        seeker_history = self._field_history_by_profile.get(seeker_profile_id, {})
+        match_history = self._field_history_by_profile.get(match_profile_id, {})
+
+        if not seeker_history and not match_history:
+            return None
+
+        context = {}
+
+        # Get what the seeker is looking for (seeking field) with dates
+        if 'seeking' in seeker_history:
+            # Get the most recent entry
+            seeking_records = sorted(
+                seeker_history['seeking'],
+                key=lambda x: x.get('event_date') or '',
+                reverse=True
+            )
+            if seeking_records:
+                latest = seeking_records[0]
+                context['seeker_mentioned'] = {
+                    'field': 'seeking',
+                    'value': latest.get('field_value', '')[:200],
+                    'event_date': latest.get('event_date'),
+                    'event_name': latest.get('event_name')
+                }
+
+        # Get what the match is offering (offering field) with dates
+        if 'offering' in match_history:
+            offering_records = sorted(
+                match_history['offering'],
+                key=lambda x: x.get('event_date') or '',
+                reverse=True
+            )
+            if offering_records:
+                latest = offering_records[0]
+                context['match_offering'] = {
+                    'field': 'offering',
+                    'value': latest.get('field_value', '')[:200],
+                    'event_date': latest.get('event_date'),
+                    'event_name': latest.get('event_name')
+                }
+
+        # Also include what_you_do for the match
+        if 'what_you_do' in match_history:
+            what_records = sorted(
+                match_history['what_you_do'],
+                key=lambda x: x.get('event_date') or '',
+                reverse=True
+            )
+            if what_records:
+                latest = what_records[0]
+                context['match_described'] = {
+                    'field': 'what_you_do',
+                    'value': latest.get('field_value', '')[:200],
+                    'event_date': latest.get('event_date'),
+                    'event_name': latest.get('event_name')
+                }
+
+        return context if context else None
+
     def _generate_with_retry(self, target_profile: Dict, candidate_profile: Dict, max_retries: int = 3) -> Optional[Dict]:
         """Generate rich analysis with exponential backoff for rate limits"""
         import time
@@ -1548,6 +1654,10 @@ class ConversationAwareMatchGenerator(HybridMatchGenerator):
                 if match.get('rich_analysis'):
                     match_data['rich_analysis'] = match['rich_analysis']
 
+                # Add time-based match context if available
+                if match.get('match_context'):
+                    match_data['match_context'] = match['match_context']
+
                 batch_data.append(match_data)
 
             try:
@@ -1630,16 +1740,23 @@ class ConversationAwareMatchGenerator(HybridMatchGenerator):
                 dismissed_ids=dismissed_ids
             )
 
-            # Add to all_matches with rank
+            # Add to all_matches with rank and match context
             for rank, match in enumerate(matches):
-                all_matches.append({
+                match_entry = {
                     'profile_id': target['id'],
                     'suggested_profile_id': match['profile']['id'],
                     'score': match['score'],
                     'reason': match.get('reason', ''),
                     'rank': rank + 1,
                     'rich_analysis': None
-                })
+                }
+
+                # Build time-based match context if field history is available
+                match_context = self._build_match_context(target['id'], match['profile']['id'])
+                if match_context:
+                    match_entry['match_context'] = match_context
+
+                all_matches.append(match_entry)
 
             if (idx + 1) % 100 == 0:
                 print(f"  Scored {idx + 1}/{len(target_profiles)} profiles...")
