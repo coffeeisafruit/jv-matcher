@@ -753,3 +753,4 @@ class AIProfileExtractor:
                 "error": str(e),
                 "message": f"Failed to process transcript: {str(e)}"
             }
+
