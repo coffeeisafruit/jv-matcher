@@ -120,6 +120,80 @@ st.markdown("""
 if SUPABASE_AVAILABLE:
     auth_service = AuthService()
 
+def get_match_with_rich_analysis(supabase, profile_id: str, suggested_profile_id: str, rich_match_service=None) -> dict:
+    """
+    Get a match suggestion, generating rich analysis on-demand if missing.
+
+    This is used for matches ranked 6-10 where rich analysis wasn't pre-generated.
+
+    Args:
+        supabase: Supabase client
+        profile_id: The user's profile ID
+        suggested_profile_id: The suggested match's profile ID
+        rich_match_service: Optional RichMatchService instance for generation
+
+    Returns:
+        Match suggestion dict with rich_analysis populated
+    """
+    try:
+        # Fetch the match
+        match_result = supabase.table("match_suggestions") \
+            .select("*") \
+            .eq("profile_id", profile_id) \
+            .eq("suggested_profile_id", suggested_profile_id) \
+            .limit(1) \
+            .execute()
+
+        if not match_result.data:
+            return None
+
+        match = match_result.data[0]
+
+        # If rich analysis exists, return as-is
+        if match.get('rich_analysis'):
+            return match
+
+        # If no rich analysis and we have the service, generate on-demand
+        if rich_match_service:
+            try:
+                # Fetch both profiles
+                target_result = supabase.table("profiles") \
+                    .select("*") \
+                    .eq("id", profile_id) \
+                    .limit(1) \
+                    .execute()
+
+                candidate_result = supabase.table("profiles") \
+                    .select("*") \
+                    .eq("id", suggested_profile_id) \
+                    .limit(1) \
+                    .execute()
+
+                if target_result.data and candidate_result.data:
+                    target = target_result.data[0]
+                    candidate = candidate_result.data[0]
+
+                    # Generate rich analysis
+                    rich_result = rich_match_service.generate_rich_analysis(target, candidate)
+
+                    if rich_result and rich_result.get('success'):
+                        # Save to database for future use
+                        supabase.table("match_suggestions") \
+                            .update({"rich_analysis": rich_result['analysis']}) \
+                            .eq("profile_id", profile_id) \
+                            .eq("suggested_profile_id", suggested_profile_id) \
+                            .execute()
+
+                        match['rich_analysis'] = rich_result['analysis']
+            except Exception as e:
+                print(f"Error generating on-demand rich analysis: {e}")
+
+        return match
+
+    except Exception as e:
+        print(f"Error fetching match: {e}")
+        return None
+
 def main():
     if SUPABASE_AVAILABLE:
         init_session_state()

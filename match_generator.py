@@ -991,6 +991,8 @@ class ConversationAwareMatchGenerator(HybridMatchGenerator):
     - Keyword overlap: 15% (was 20%)
     - Reach compatibility: 10% (was 15%)
     - Conversation signals: 20% (NEW)
+
+    Optimized with pre-fetching to eliminate per-pair database queries.
     """
 
     WEIGHTS = {
@@ -1011,84 +1013,243 @@ class ConversationAwareMatchGenerator(HybridMatchGenerator):
         except Exception as e:
             print(f"Conversation analyzer not available: {e}")
 
+        # Pre-fetched conversation data (populated by _prefetch_conversation_data)
+        self._signals_by_profile = {}  # profile_id -> [signals]
+        self._signals_by_target = {}   # target_profile_id -> [signals from others targeting this profile]
+        self._transcripts_by_profile = {}  # profile_id -> {transcript_ids}
+        self._conversation_data_loaded = False
+
+    def _prefetch_conversation_data(self, profile_ids: List[str] = None) -> None:
+        """
+        Pre-fetch all conversation data in 2 queries, index in memory.
+        This eliminates ~70 million queries when matching 3,734 profiles.
+        """
+        if not self.conversation_analyzer:
+            print("No conversation analyzer available, skipping prefetch")
+            return
+
+        supabase = self.conversation_analyzer.supabase
+
+        print("Pre-fetching conversation data...")
+
+        # Query 1: All signals (needs, offers, connections)
+        try:
+            if profile_ids:
+                # Fetch in batches to avoid query limits
+                all_signals = []
+                batch_size = 500
+                for i in range(0, len(profile_ids), batch_size):
+                    batch = profile_ids[i:i + batch_size]
+                    signals_response = supabase.table("conversation_signals") \
+                        .select("*") \
+                        .in_("profile_id", batch) \
+                        .execute()
+                    all_signals.extend(signals_response.data or [])
+            else:
+                signals_response = supabase.table("conversation_signals") \
+                    .select("*") \
+                    .execute()
+                all_signals = signals_response.data or []
+
+            print(f"  Loaded {len(all_signals)} conversation signals")
+        except Exception as e:
+            print(f"  Error loading conversation signals: {e}")
+            all_signals = []
+
+        # Query 2: All speaker-transcript mappings
+        try:
+            if profile_ids:
+                all_speakers = []
+                for i in range(0, len(profile_ids), batch_size):
+                    batch = profile_ids[i:i + batch_size]
+                    speakers_response = supabase.table("conversation_speakers") \
+                        .select("matched_profile_id, transcript_id") \
+                        .in_("matched_profile_id", batch) \
+                        .execute()
+                    all_speakers.extend(speakers_response.data or [])
+            else:
+                speakers_response = supabase.table("conversation_speakers") \
+                    .select("matched_profile_id, transcript_id") \
+                    .not_.is_("matched_profile_id", "null") \
+                    .execute()
+                all_speakers = speakers_response.data or []
+
+            print(f"  Loaded {len(all_speakers)} speaker-transcript mappings")
+        except Exception as e:
+            print(f"  Error loading speaker mappings: {e}")
+            all_speakers = []
+
+        # Index signals by profile_id
+        self._signals_by_profile = {}
+        self._signals_by_target = {}
+
+        for signal in all_signals:
+            pid = signal.get('profile_id')
+            tid = signal.get('target_profile_id')
+
+            if pid:
+                if pid not in self._signals_by_profile:
+                    self._signals_by_profile[pid] = []
+                self._signals_by_profile[pid].append(signal)
+
+            if tid:
+                if tid not in self._signals_by_target:
+                    self._signals_by_target[tid] = []
+                self._signals_by_target[tid].append(signal)
+
+        # Index transcripts by profile
+        self._transcripts_by_profile = {}
+        for speaker in all_speakers:
+            pid = speaker.get('matched_profile_id')
+            if pid:
+                if pid not in self._transcripts_by_profile:
+                    self._transcripts_by_profile[pid] = set()
+                self._transcripts_by_profile[pid].add(speaker.get('transcript_id'))
+
+        self._conversation_data_loaded = True
+        print(f"  Indexed: {len(self._signals_by_profile)} profiles with signals, "
+              f"{len(self._transcripts_by_profile)} profiles in conversations")
+
+    def get_affected_profiles_bidirectional(self, new_profile_ids: List[str]) -> Set[str]:
+        """
+        Get all profiles that need match regeneration when new profiles are added.
+
+        This is bidirectional - when Person A is new, we regenerate:
+        1. Matches FOR Person A (who should A connect with?)
+        2. Matches WHERE Person A is a candidate (who else benefits from meeting A?)
+
+        Args:
+            new_profile_ids: List of newly added/updated profile IDs
+
+        Returns:
+            Set of all profile IDs that need match regeneration
+        """
+        if not new_profile_ids:
+            return set()
+
+        affected = set(new_profile_ids)  # Start with new profiles themselves
+        supabase = self.directory_service.supabase
+
+        try:
+            # Pre-fetch the new profiles' needs and offers from profiles table
+            new_profiles = supabase.table("profiles") \
+                .select("id, business_focus, service_provided") \
+                .in_("id", list(new_profile_ids)) \
+                .execute()
+
+            # Collect keywords from new profiles
+            new_keywords = set()
+            for p in (new_profiles.data or []):
+                text = ' '.join(filter(None, [
+                    p.get('business_focus', ''),
+                    p.get('service_provided', '')
+                ])).lower()
+                words = text.split()
+                new_keywords.update(w for w in words if len(w) > 3)
+
+            if new_keywords:
+                # Find profiles with overlapping business focus (potential matches)
+                # Use text search on business_focus and service_provided
+                all_profiles = supabase.table("profiles") \
+                    .select("id, business_focus, service_provided") \
+                    .not_.in_("id", list(new_profile_ids)) \
+                    .execute()
+
+                for p in (all_profiles.data or []):
+                    text = ' '.join(filter(None, [
+                        p.get('business_focus', ''),
+                        p.get('service_provided', '')
+                    ])).lower()
+                    profile_words = set(w for w in text.split() if len(w) > 3)
+
+                    # If there's keyword overlap, this profile might have new matches
+                    if profile_words & new_keywords:
+                        affected.add(p['id'])
+
+            # Add profiles from the same conversation transcript
+            new_transcripts = supabase.table("conversation_speakers") \
+                .select("transcript_id") \
+                .in_("matched_profile_id", list(new_profile_ids)) \
+                .execute()
+
+            transcript_ids = [t['transcript_id'] for t in (new_transcripts.data or []) if t.get('transcript_id')]
+
+            if transcript_ids:
+                same_conversation_profiles = supabase.table("conversation_speakers") \
+                    .select("matched_profile_id") \
+                    .in_("transcript_id", transcript_ids) \
+                    .not_.is_("matched_profile_id", "null") \
+                    .execute()
+
+                for p in (same_conversation_profiles.data or []):
+                    if p.get('matched_profile_id'):
+                        affected.add(p['matched_profile_id'])
+
+            print(f"Bidirectional update: {len(new_profile_ids)} new profiles -> {len(affected)} affected profiles")
+
+        except Exception as e:
+            print(f"Error calculating affected profiles: {e}")
+            # On error, just return the new profiles
+            return set(new_profile_ids)
+
+        return affected
+
     def calculate_conversation_score(
         self,
         target_profile_id: str,
         candidate_profile_id: str
     ) -> float:
         """
-        Calculate conversation-based matching score.
+        Calculate conversation-based matching score using pre-fetched cached data.
 
         Score components:
-        1. +40 pts: Candidate expressed interest in target's offerings
+        1. +40 pts: Candidate expressed connection interest in target
         2. +30 pts: Target's needs match candidate's offers
-        3. +20 pts: Shared conversation topics
-        4. +10 pts: Were in the same conversation (already met)
+        3. +10 pts: Were in the same conversation (already met)
         """
-        if not self.conversation_analyzer:
-            return 50.0  # Neutral if no conversation data
+        if not self._conversation_data_loaded:
+            return 50.0  # Neutral if no conversation data loaded
 
         score = 0.0
 
-        try:
-            supabase = self.conversation_analyzer.supabase
-
-            # 1. Check if candidate expressed connection interest in target
-            connection_signals = supabase.table("conversation_signals") \
-                .select("*") \
-                .eq("profile_id", candidate_profile_id) \
-                .eq("target_profile_id", target_profile_id) \
-                .eq("signal_type", "connection") \
-                .execute()
-
-            if connection_signals.data:
+        # 1. Check if candidate expressed connection interest in target (+40 pts)
+        target_signals = self._signals_by_target.get(target_profile_id, [])
+        for signal in target_signals:
+            if (signal.get('profile_id') == candidate_profile_id and
+                signal.get('signal_type') == 'connection'):
                 score += 40.0
+                break
 
-            # 2. Check if target's needs match candidate's offers
-            target_needs = supabase.table("conversation_signals") \
-                .select("signal_text") \
-                .eq("profile_id", target_profile_id) \
-                .eq("signal_type", "need") \
-                .execute()
+        # 2. Check if target's needs match candidate's offers (+30 pts)
+        target_signals_all = self._signals_by_profile.get(target_profile_id, [])
+        candidate_signals_all = self._signals_by_profile.get(candidate_profile_id, [])
 
-            candidate_offers = supabase.table("conversation_signals") \
-                .select("signal_text") \
-                .eq("profile_id", candidate_profile_id) \
-                .eq("signal_type", "offer") \
-                .execute()
+        # Extract target's needs
+        need_keywords = set()
+        for signal in target_signals_all:
+            if signal.get('signal_type') == 'need':
+                words = signal.get('signal_text', '').lower().split()
+                need_keywords.update(w for w in words if len(w) > 3)
 
-            if target_needs.data and candidate_offers.data:
-                # Simple keyword overlap check
-                need_keywords = set()
-                for need in target_needs.data:
-                    words = need.get("signal_text", "").lower().split()
-                    need_keywords.update(w for w in words if len(w) > 3)
+        # Extract candidate's offers
+        offer_keywords = set()
+        for signal in candidate_signals_all:
+            if signal.get('signal_type') == 'offer':
+                words = signal.get('signal_text', '').lower().split()
+                offer_keywords.update(w for w in words if len(w) > 3)
 
-                offer_keywords = set()
-                for offer in candidate_offers.data:
-                    words = offer.get("signal_text", "").lower().split()
-                    offer_keywords.update(w for w in words if len(w) > 3)
+        # Check keyword overlap
+        if need_keywords and offer_keywords:
+            overlap = len(need_keywords & offer_keywords)
+            if overlap > 0:
+                score += min(30.0, overlap * 10)
 
-                overlap = len(need_keywords & offer_keywords)
-                if overlap > 0:
-                    score += min(30.0, overlap * 10)
+        # 3. Check if they were in the same conversation (+10 pts)
+        target_transcripts = self._transcripts_by_profile.get(target_profile_id, set())
+        candidate_transcripts = self._transcripts_by_profile.get(candidate_profile_id, set())
 
-            # 3. Check shared topics
-            shared_topics = self.conversation_analyzer.get_shared_topics(
-                target_profile_id, candidate_profile_id
-            )
-            if shared_topics:
-                score += min(20.0, len(shared_topics) * 5)
-
-            # 4. Check if they were in the same conversation
-            if self.conversation_analyzer.were_in_same_conversation(
-                target_profile_id, candidate_profile_id
-            ):
-                score += 10.0
-
-        except Exception as e:
-            print(f"Error calculating conversation score: {e}")
-            return 50.0  # Neutral on error
+        if target_transcripts & candidate_transcripts:
+            score += 10.0
 
         return min(100.0, score)
 
@@ -1179,6 +1340,368 @@ class ConversationAwareMatchGenerator(HybridMatchGenerator):
             collaboration_idea = f"[Strong conversation signal] {collaboration_idea}"
 
         return round(total_score, 1), component_scores, list(common_keywords)[:5], collaboration_idea
+
+    def _generate_with_retry(self, target_profile: Dict, candidate_profile: Dict, max_retries: int = 3) -> Optional[Dict]:
+        """Generate rich analysis with exponential backoff for rate limits"""
+        import time
+        import random
+
+        if not self.rich_match_service:
+            return None
+
+        for attempt in range(max_retries):
+            try:
+                return self.rich_match_service.generate_rich_analysis(target_profile, candidate_profile)
+            except Exception as e:
+                error_str = str(e).lower()
+                if ("rate_limit" in error_str or "429" in error_str) and attempt < max_retries - 1:
+                    wait_time = (2 ** attempt) + random.uniform(0, 1)
+                    print(f"Rate limit hit, waiting {wait_time:.1f}s before retry {attempt + 2}/{max_retries}")
+                    time.sleep(wait_time)
+                else:
+                    if attempt == max_retries - 1:
+                        print(f"Rich analysis failed after {max_retries} attempts: {e}")
+                    raise
+        return None
+
+    def _generate_rich_analyses_parallel(self, matches_to_generate: List[Dict], all_profiles_dict: Dict[str, Dict]) -> Dict[Tuple[str, str], Dict]:
+        """
+        Generate rich analyses for multiple matches in parallel with rate limiting.
+
+        Args:
+            matches_to_generate: List of dicts with 'profile_id' and 'suggested_profile_id'
+            all_profiles_dict: Dict mapping profile_id to full profile data
+
+        Returns:
+            Dict mapping (profile_id, suggested_profile_id) to rich analysis result
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        if not self.rich_match_service:
+            print("Rich match service not available, skipping rich analysis generation")
+            return {}
+
+        # Tier 2: 2,500 requests/minute max (token-limited)
+        # 100 concurrent workers with ~2.5s latency = ~2,400/minute (safe)
+        MAX_WORKERS = 100
+
+        results = {}
+        total = len(matches_to_generate)
+        completed = 0
+
+        print(f"Generating rich analyses for {total} matches with {MAX_WORKERS} parallel workers...")
+
+        def generate_single(match_info):
+            profile_id = match_info['profile_id']
+            suggested_id = match_info['suggested_profile_id']
+
+            target_profile = all_profiles_dict.get(profile_id)
+            candidate_profile = all_profiles_dict.get(suggested_id)
+
+            if not target_profile or not candidate_profile:
+                return (profile_id, suggested_id), None
+
+            result = self._generate_with_retry(target_profile, candidate_profile)
+            return (profile_id, suggested_id), result
+
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_to_match = {
+                executor.submit(generate_single, match): match
+                for match in matches_to_generate
+            }
+
+            for future in as_completed(future_to_match):
+                try:
+                    pair_key, result = future.result()
+                    results[pair_key] = result
+                    completed += 1
+
+                    if completed % 100 == 0:
+                        print(f"  Rich analysis progress: {completed}/{total} ({completed*100//total}%)")
+                except Exception as e:
+                    match = future_to_match[future]
+                    pair_key = (match['profile_id'], match['suggested_profile_id'])
+                    results[pair_key] = None
+                    completed += 1
+                    print(f"  Error generating rich analysis for {pair_key}: {e}")
+
+        successful = sum(1 for v in results.values() if v and v.get('success'))
+        print(f"Rich analysis complete: {successful}/{total} successful")
+
+        return results
+
+    def _get_cached_rich_analyses(self, pairs: List[Tuple[str, str]]) -> Dict[Tuple[str, str], str]:
+        """
+        Fetch existing rich analyses from database for the given profile pairs.
+
+        Args:
+            pairs: List of (profile_id, suggested_profile_id) tuples
+
+        Returns:
+            Dict mapping (profile_id, suggested_profile_id) to cached rich_analysis text
+        """
+        if not pairs:
+            return {}
+
+        cache = {}
+        supabase = self.directory_service.supabase
+
+        # Batch fetch in groups to avoid query limits
+        BATCH_SIZE = 100
+
+        for i in range(0, len(pairs), BATCH_SIZE):
+            batch = pairs[i:i + BATCH_SIZE]
+
+            # Build OR conditions for this batch
+            for profile_id, suggested_id in batch:
+                try:
+                    existing = supabase.table("match_suggestions") \
+                        .select("profile_id, suggested_profile_id, rich_analysis") \
+                        .eq("profile_id", profile_id) \
+                        .eq("suggested_profile_id", suggested_id) \
+                        .not_.is_("rich_analysis", "null") \
+                        .limit(1) \
+                        .execute()
+
+                    if existing.data and existing.data[0].get('rich_analysis'):
+                        cache[(profile_id, suggested_id)] = existing.data[0]['rich_analysis']
+                except Exception as e:
+                    # Skip this pair on error
+                    pass
+
+        print(f"Rich analysis cache: found {len(cache)}/{len(pairs)} cached analyses")
+        return cache
+
+    def _generate_rich_analyses_with_cache(self, matches: List[Dict], all_profiles_dict: Dict[str, Dict]) -> Dict[Tuple[str, str], Dict]:
+        """
+        Generate rich analyses, using cache for existing pairs to avoid regeneration.
+
+        Args:
+            matches: List of match dicts with 'profile_id' and 'suggested_profile_id'
+            all_profiles_dict: Dict mapping profile_id to full profile data
+
+        Returns:
+            Dict mapping (profile_id, suggested_profile_id) to rich analysis result
+        """
+        if not matches:
+            return {}
+
+        # Build list of pairs we need
+        pairs_needed = [(m['profile_id'], m['suggested_profile_id']) for m in matches]
+
+        # Check cache first
+        cached = self._get_cached_rich_analyses(pairs_needed)
+
+        # Separate into cached vs needs-generation
+        to_generate = []
+        results = {}
+
+        for match in matches:
+            pair_key = (match['profile_id'], match['suggested_profile_id'])
+            if pair_key in cached:
+                # Use cached analysis - wrap in expected format
+                results[pair_key] = {
+                    'success': True,
+                    'analysis': cached[pair_key]
+                }
+            else:
+                to_generate.append(match)
+
+        print(f"Rich analysis: {len(cached)} cached, {len(to_generate)} to generate")
+
+        # Generate only what's needed (parallel with rate limiting)
+        if to_generate:
+            new_results = self._generate_rich_analyses_parallel(to_generate, all_profiles_dict)
+            results.update(new_results)
+
+        return results
+
+    def _batch_save_all_matches(self, all_matches: List[Dict]) -> int:
+        """
+        Save all matches in large batches (500 rows per insert).
+        Returns the number of matches saved successfully.
+        """
+        if not all_matches:
+            return 0
+
+        BATCH_SIZE = 500
+        saved = 0
+
+        # Get supabase client
+        supabase = self.directory_service.supabase
+
+        for i in range(0, len(all_matches), BATCH_SIZE):
+            batch = all_matches[i:i + BATCH_SIZE]
+
+            batch_data = []
+            for match in batch:
+                match_data = {
+                    "profile_id": match['profile_id'],
+                    "suggested_profile_id": match['suggested_profile_id'],
+                    "match_score": match.get('score', 0),
+                    "match_reason": match.get('reason', ''),
+                    "source": "hybrid_matcher",
+                    "status": "pending"
+                }
+
+                # Add rich analysis if available
+                if match.get('rich_analysis'):
+                    match_data['rich_analysis'] = match['rich_analysis']
+
+                batch_data.append(match_data)
+
+            try:
+                # Use upsert to handle duplicates
+                result = supabase.table("match_suggestions").upsert(
+                    batch_data,
+                    on_conflict="profile_id,suggested_profile_id"
+                ).execute()
+                saved += len(batch_data)
+                print(f"  Saved batch {i//BATCH_SIZE + 1}: {len(batch_data)} matches")
+            except Exception as e:
+                print(f"  Error saving batch: {e}")
+                # Try individual inserts as fallback
+                for match_data in batch_data:
+                    try:
+                        supabase.table("match_suggestions").upsert(
+                            match_data,
+                            on_conflict="profile_id,suggested_profile_id"
+                        ).execute()
+                        saved += 1
+                    except:
+                        pass
+
+        return saved
+
+    def generate_matches_two_stage(
+        self,
+        profile_ids: List[str] = None,
+        top_n: int = 10,
+        min_score: float = 15.0,
+        generate_rich_for_top_n: int = 5
+    ) -> Dict:
+        """
+        Two-stage match generation: instant scores, then background rich analysis.
+
+        Stage 1: Calculate and save all matches without rich analysis (~30 seconds)
+        Stage 2: Generate rich analysis for top N matches per profile (~8 minutes for top 5)
+
+        Args:
+            profile_ids: Optional list of profile IDs to generate matches for. If None, all profiles.
+            top_n: Number of top matches to generate per profile
+            min_score: Minimum score threshold
+            generate_rich_for_top_n: Generate rich analysis for top N matches (default 5)
+
+        Returns:
+            Dict with success status and statistics
+        """
+        import time
+        start_time = time.time()
+
+        # Get all profiles
+        all_profiles = self.directory_service.get_all_profiles_for_matching()
+        if not all_profiles:
+            return {'success': False, 'error': 'Failed to fetch profiles'}
+
+        all_profiles_dict = {p['id']: p for p in all_profiles}
+
+        # Determine which profiles to generate matches for
+        if profile_ids:
+            target_profiles = [all_profiles_dict[pid] for pid in profile_ids if pid in all_profiles_dict]
+        else:
+            target_profiles = all_profiles
+
+        print(f"Stage 1: Scoring matches for {len(target_profiles)} profiles against {len(all_profiles)} candidates...")
+
+        # Pre-fetch conversation data for optimized scoring
+        profile_id_list = [p['id'] for p in all_profiles]
+        self._prefetch_conversation_data(profile_id_list)
+
+        # STAGE 1: Calculate all scores (no OpenAI)
+        stage1_start = time.time()
+        all_matches = []
+
+        for idx, target in enumerate(target_profiles):
+            dismissed_ids = self.directory_service.get_dismissed_profile_ids(target['id'])
+
+            # Generate matches for this profile
+            matches = self.generate_matches_for_profile(
+                target, all_profiles, top_n=top_n, min_score=min_score,
+                dismissed_ids=dismissed_ids
+            )
+
+            # Add to all_matches with rank
+            for rank, match in enumerate(matches):
+                all_matches.append({
+                    'profile_id': target['id'],
+                    'suggested_profile_id': match['profile']['id'],
+                    'score': match['score'],
+                    'reason': match.get('reason', ''),
+                    'rank': rank + 1,
+                    'rich_analysis': None
+                })
+
+            if (idx + 1) % 100 == 0:
+                print(f"  Scored {idx + 1}/{len(target_profiles)} profiles...")
+
+        stage1_time = time.time() - stage1_start
+        print(f"Stage 1 complete: {len(all_matches)} matches scored in {stage1_time:.1f}s")
+
+        # Save all matches (without rich analysis)
+        saved_count = self._batch_save_all_matches(all_matches)
+        print(f"Saved {saved_count} matches to database")
+
+        # STAGE 2: Generate rich analysis for top N matches only
+        if generate_rich_for_top_n > 0 and self.rich_match_service:
+            stage2_start = time.time()
+            top_matches = [m for m in all_matches if m['rank'] <= generate_rich_for_top_n]
+            print(f"Stage 2: Generating rich analysis for {len(top_matches)} top matches...")
+
+            # Generate rich analyses in parallel
+            rich_results = self._generate_rich_analyses_parallel(top_matches, all_profiles_dict)
+
+            # Update matches with rich analysis
+            rich_updates = []
+            for match in top_matches:
+                pair_key = (match['profile_id'], match['suggested_profile_id'])
+                rich_result = rich_results.get(pair_key)
+                if rich_result and rich_result.get('success'):
+                    rich_updates.append({
+                        'profile_id': match['profile_id'],
+                        'suggested_profile_id': match['suggested_profile_id'],
+                        'rich_analysis': rich_result.get('analysis')
+                    })
+
+            # Batch update rich analyses
+            if rich_updates:
+                supabase = self.directory_service.supabase
+                for update in rich_updates:
+                    try:
+                        supabase.table("match_suggestions").update({
+                            "rich_analysis": update['rich_analysis']
+                        }).eq("profile_id", update['profile_id']).eq(
+                            "suggested_profile_id", update['suggested_profile_id']
+                        ).execute()
+                    except Exception as e:
+                        print(f"  Error updating rich analysis: {e}")
+
+            stage2_time = time.time() - stage2_start
+            print(f"Stage 2 complete: {len(rich_updates)} rich analyses in {stage2_time:.1f}s")
+        else:
+            rich_updates = []
+            stage2_time = 0
+
+        total_time = time.time() - start_time
+
+        return {
+            'success': True,
+            'profiles_processed': len(target_profiles),
+            'matches_created': saved_count,
+            'rich_analyses_generated': len(rich_updates),
+            'stage1_time_seconds': round(stage1_time, 1),
+            'stage2_time_seconds': round(stage2_time, 1),
+            'total_time_seconds': round(total_time, 1)
+        }
 
 
 def get_matcher(use_ai: bool = False, use_hybrid: bool = False, use_conversation: bool = False, api_key: Optional[str] = None):
