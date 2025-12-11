@@ -909,3 +909,126 @@ class DirectoryService:
             return results
         except Exception as e:
             return []
+
+    # ==========================================
+    # INTAKE SUBMISSION HELPERS
+    # ==========================================
+
+    def save_intake_submission(
+        self,
+        profile_id: str,
+        event_id: str,
+        event_name: str,
+        verified_offers: List[str],
+        verified_needs: List[str],
+        match_preference: str,
+        suggested_offers: Optional[List[str]] = None,
+        suggested_needs: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Upsert intake submission for a profile/event combination"""
+        try:
+            from datetime import datetime
+
+            # Validate match_preference
+            valid_preferences = ['Peer_Bundle', 'Referral_Upstream', 'Referral_Downstream', 'Service_Provider']
+            if match_preference not in valid_preferences:
+                return {"success": False, "error": f"Invalid match_preference. Must be one of: {valid_preferences}"}
+
+            insert_data = {
+                "profile_id": profile_id,
+                "event_id": event_id,
+                "event_name": event_name,
+                "verified_offers": verified_offers,
+                "verified_needs": verified_needs,
+                "match_preference": match_preference,
+                "confirmed_at": datetime.utcnow().isoformat()
+            }
+
+            # Add optional fields if provided
+            if suggested_offers is not None:
+                insert_data["suggested_offers"] = suggested_offers
+            if suggested_needs is not None:
+                insert_data["suggested_needs"] = suggested_needs
+
+            # Upsert to handle updates for existing profile/event combinations
+            response = self.client.table("intake_submissions").upsert(
+                insert_data,
+                on_conflict="profile_id,event_id"
+            ).execute()
+
+            return {"success": True, "data": response.data[0] if response.data else None}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_latest_intake(self, profile_id: str) -> Optional[Dict[str, Any]]:
+        """Get the most recent intake submission for a profile"""
+        try:
+            response = self.client.table("intake_submissions") \
+                .select("*") \
+                .eq("profile_id", profile_id) \
+                .order("created_at", desc=True) \
+                .limit(1) \
+                .execute()
+
+            return response.data[0] if response.data else None
+        except Exception:
+            return None
+
+    def get_intake_for_event(self, profile_id: str, event_id: str) -> Optional[Dict[str, Any]]:
+        """Get intake submission for a specific profile/event combination"""
+        try:
+            response = self.client.table("intake_submissions") \
+                .select("*") \
+                .eq("profile_id", profile_id) \
+                .eq("event_id", event_id) \
+                .single() \
+                .execute()
+
+            return response.data
+        except Exception:
+            return None
+
+    def get_suggested_intake_data(self, profile_id: str) -> Dict[str, Any]:
+        """Get suggested offers and needs from profile's offering and seeking fields"""
+        try:
+            response = self.client.table("profiles") \
+                .select("offering, seeking") \
+                .eq("id", profile_id) \
+                .single() \
+                .execute()
+
+            if not response.data:
+                return {"suggested_offers": [], "suggested_needs": []}
+
+            # Parse offering and seeking fields (assuming they're stored as text or arrays)
+            offering = response.data.get("offering", []) or []
+            seeking = response.data.get("seeking", []) or []
+
+            # If they're strings, convert to lists
+            if isinstance(offering, str):
+                offering = [item.strip() for item in offering.split(",") if item.strip()]
+            if isinstance(seeking, str):
+                seeking = [item.strip() for item in seeking.split(",") if item.strip()]
+
+            return {
+                "suggested_offers": offering,
+                "suggested_needs": seeking
+            }
+        except Exception as e:
+            return {"suggested_offers": [], "suggested_needs": []}
+
+    def update_profile_last_active(self, profile_id: str) -> Dict[str, Any]:
+        """Update the last_active_at timestamp for a profile"""
+        try:
+            from datetime import datetime
+
+            update_data = {"last_active_at": datetime.utcnow().isoformat()}
+
+            self.client.table("profiles") \
+                .update(update_data) \
+                .eq("id", profile_id) \
+                .execute()
+
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}

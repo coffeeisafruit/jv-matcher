@@ -1821,8 +1821,638 @@ class ConversationAwareMatchGenerator(HybridMatchGenerator):
         }
 
 
-def get_matcher(use_ai: bool = False, use_hybrid: bool = False, use_conversation: bool = False, api_key: Optional[str] = None):
+class V1MatchGenerator:
+    """
+    V1 Match Generation Algorithm - Reciprocal Scoring with Harmonic Mean
+
+    Formula: Score_AB = (0.45 * Intent) + (0.25 * Synergy) + (0.20 * Momentum) + (0.10 * Context)
+    FinalScore = HarmonicMean = (2 * AB * BA) / (AB + BA)
+
+    Features:
+    - Verified Intent (Platinum) vs Profile Data (Legacy) trust weighting
+    - Scale Symmetry penalty for 10x+ reach mismatches
+    - Popularity cap to prevent over-representation
+    - Semantic matching via GPT-4o-mini
+    """
+
+    WEIGHTS = {
+        'intent': 0.45,
+        'synergy': 0.25,
+        'momentum': 0.20,
+        'context': 0.10
+    }
+
+    # Niche adjacency map for synergy calculations
+    NICHE_ADJACENCY = {
+        'Health & Wellness': ['Personal Development', 'Fitness & Nutrition', 'Spirituality & Mindfulness'],
+        'Personal Development': ['Health & Wellness', 'Business & Entrepreneurship', 'Spirituality & Mindfulness'],
+        'Business & Entrepreneurship': ['Personal Development', 'Marketing & Sales', 'Finance & Investing'],
+        'Marketing & Sales': ['Business & Entrepreneurship', 'E-commerce & Online Business', 'Content Creation'],
+        'E-commerce & Online Business': ['Marketing & Sales', 'Technology & Software'],
+        'Technology & Software': ['E-commerce & Online Business', 'Finance & Investing'],
+        'Finance & Investing': ['Technology & Software', 'Business & Entrepreneurship'],
+        'Fitness & Nutrition': ['Health & Wellness', 'Personal Development'],
+        'Relationships & Dating': ['Personal Development', 'Lifestyle & Entertainment'],
+        'Lifestyle & Entertainment': ['Relationships & Dating', 'Travel & Adventure', 'Content Creation'],
+        'Travel & Adventure': ['Lifestyle & Entertainment', 'Personal Development'],
+        'Education & Learning': ['Personal Development', 'Business & Entrepreneurship'],
+        'Parenting & Family': ['Personal Development', 'Health & Wellness'],
+        'Spirituality & Mindfulness': ['Personal Development', 'Health & Wellness'],
+        'Creative Arts': ['Personal Development', 'Lifestyle & Entertainment', 'Content Creation'],
+        'Content Creation': ['Marketing & Sales', 'Lifestyle & Entertainment', 'Creative Arts'],
+    }
+
+    POPULARITY_CAP = 5  # Max appearances in Top 3 per cycle
+    SCALE_PENALTY_THRESHOLD = 0.1  # 10x difference triggers penalty
+
+    def __init__(self, openai_api_key: Optional[str] = None):
+        self.directory_service = DirectoryService(use_admin=True)
+        self.supabase = self.directory_service.client
+        self._semantic_cache = {}
+
+        # Initialize OpenAI client for semantic matching
+        try:
+            from openai import OpenAI
+            self.openai_client = OpenAI(api_key=openai_api_key or os.getenv('OPENAI_API_KEY'))
+            self._openai_available = True
+        except Exception as e:
+            print(f"OpenAI not available for V1MatchGenerator: {e}")
+            self._openai_available = False
+            self.openai_client = None
+
+    def calculate_harmonic_mean(self, score_ab: float, score_ba: float) -> float:
+        """
+        Reciprocal scoring - penalizes lopsided matches.
+        HM = (2 * AB * BA) / (AB + BA)
+        """
+        if score_ab + score_ba == 0:
+            return 0.0
+        return (2 * score_ab * score_ba) / (score_ab + score_ba)
+
+    def calculate_intent_score(self, needs: List[str], offers: List[str]) -> float:
+        """
+        Binary intent matching: 1.0 if ANY need matches ANY offer, else 0.0
+        Uses semantic similarity via GPT-4o-mini
+        """
+        if not needs or not offers:
+            return 0.0
+
+        # Check cache first
+        cache_key = (tuple(sorted(needs)), tuple(sorted(offers)))
+        if cache_key in self._semantic_cache:
+            return self._semantic_cache[cache_key]
+
+        if self._openai_available and self.openai_client:
+            try:
+                prompt = f"""Compare these two lists and determine if ANY item from NEEDS semantically matches ANY item from OFFERS.
+
+NEEDS: {needs}
+OFFERS: {offers}
+
+A semantic match means the need can be fulfilled by the offer, even if worded differently.
+Examples:
+- "podcast guest" matches "speaking opportunities"
+- "email list growth" matches "list building strategies"
+- "business coach" matches "coaching services"
+
+Return ONLY "YES" if there's at least one semantic match, or "NO" if none."""
+
+                response = self.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "You are a semantic matching expert. Answer only YES or NO."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.0,
+                    max_tokens=10
+                )
+
+                result = response.choices[0].message.content.strip().upper()
+                score = 1.0 if result == "YES" else 0.0
+                self._semantic_cache[cache_key] = score
+                return score
+
+            except Exception as e:
+                print(f"Semantic matching error: {e}")
+
+        # Fallback to simple keyword matching
+        for need in needs:
+            need_words = set(need.lower().split())
+            for offer in offers:
+                offer_words = set(offer.lower().split())
+                if need_words & offer_words:  # Any word overlap
+                    return 1.0
+        return 0.0
+
+    def calculate_synergy_score(
+        self,
+        niche_a: str,
+        niche_b: str,
+        match_preference: str,
+        reach_a: int,
+        reach_b: int
+    ) -> float:
+        """
+        Synergy = Niche Logic + Scale Symmetry
+
+        Niche Logic:
+        - Peer/Bundle + Identical Niche = 1.0
+        - Peer/Bundle + Adjacent Niche = 0.6
+        - Referral + Client-Adjacent = 0.9
+        - Referral + Identical Niche = 0.1 (competitor penalty)
+        """
+        base_score = self._calculate_niche_score(niche_a, niche_b, match_preference)
+        scale_modifier = self._calculate_scale_symmetry(reach_a, reach_b, match_preference)
+        return base_score * scale_modifier
+
+    def _calculate_niche_score(self, niche_a: str, niche_b: str, match_preference: str) -> float:
+        """Calculate niche-based synergy score"""
+        identical = (niche_a or '').lower() == (niche_b or '').lower() and niche_a
+        adjacent = (niche_b or '') in self.NICHE_ADJACENCY.get(niche_a or '', [])
+
+        if match_preference == 'Peer_Bundle':
+            if identical:
+                return 1.0
+            elif adjacent:
+                return 0.6
+            else:
+                return 0.2
+
+        elif match_preference in ['Referral_Upstream', 'Referral_Downstream']:
+            if adjacent:
+                return 0.9  # Ideal referral flow
+            elif identical:
+                return 0.1  # Competitor penalty!
+            else:
+                return 0.3
+
+        elif match_preference == 'Service_Provider':
+            return 0.7  # Neutral for service relationships
+
+        return 0.5  # Default
+
+    def _calculate_scale_symmetry(self, reach_a: int, reach_b: int, match_preference: str) -> float:
+        """
+        Scale Symmetry Check - penalize 10x+ reach mismatches
+
+        Ratio = Min(A,B) / Max(A,B)
+        - R > 0.5 (similar): No penalty (1.0)
+        - R < 0.1 (10x diff): Penalty (0.5)
+        - Exception: Service_Provider ignores scale
+        """
+        if match_preference == 'Service_Provider':
+            return 1.0
+
+        reach_a = reach_a or 0
+        reach_b = reach_b or 0
+
+        if reach_a == 0 and reach_b == 0:
+            return 1.0  # Both unknown - no penalty
+
+        if reach_a == 0 or reach_b == 0:
+            return 0.8  # One unknown - slight penalty
+
+        ratio = min(reach_a, reach_b) / max(reach_a, reach_b)
+
+        if ratio > 0.5:
+            return 1.0
+        elif ratio < self.SCALE_PENALTY_THRESHOLD:
+            return 0.5
+        else:
+            # Linear interpolation between 0.1 and 0.5
+            return 0.5 + (ratio - 0.1) * (0.5 / 0.4)
+
+    def calculate_momentum_score(self, last_active_at) -> float:
+        """
+        Time decay: e^(-0.02 * days_since_active)
+
+        - Active today = 1.0
+        - 30 days ago = ~0.55 (Gold Zone)
+        - 45 days ago = ~0.41
+        - 90 days ago = ~0.17
+        """
+        import math
+        from datetime import datetime, timezone
+
+        if not last_active_at:
+            return 0.3  # Unknown = lower priority
+
+        if isinstance(last_active_at, str):
+            try:
+                last_active_at = datetime.fromisoformat(last_active_at.replace('Z', '+00:00'))
+            except:
+                return 0.3
+
+        if last_active_at.tzinfo is None:
+            last_active_at = last_active_at.replace(tzinfo=timezone.utc)
+
+        now = datetime.now(timezone.utc)
+        days = (now - last_active_at).days
+
+        return math.exp(-0.02 * max(0, days))
+
+    def calculate_context_score(self, events_a: List[str], events_b: List[str]) -> float:
+        """
+        Bonus for shared event attendance
+        +0.25 per shared event, max 1.0
+        """
+        if not events_a or not events_b:
+            return 0.0
+
+        shared = set(events_a or []).intersection(set(events_b or []))
+        return min(1.0, len(shared) * 0.25)
+
+    def _get_verified_data(self, profile_id: str) -> Dict:
+        """
+        Get verified intent data with fallback chain:
+        1. Verified intake (Platinum) - 1.0x weight
+        2. Profile fields (Legacy) - 0.3x weight
+        """
+        # Try intake_submissions first (Platinum trust)
+        try:
+            intake_result = self.supabase.table("intake_submissions") \
+                .select("*") \
+                .eq("profile_id", profile_id) \
+                .order("created_at", desc=True) \
+                .limit(1) \
+                .execute()
+
+            if intake_result.data and intake_result.data[0].get('confirmed_at'):
+                intake = intake_result.data[0]
+                return {
+                    'offers': intake.get('verified_offers', []) or [],
+                    'needs': intake.get('verified_needs', []) or [],
+                    'match_preference': intake.get('match_preference', 'Peer_Bundle'),
+                    'events': [intake.get('event_id')] if intake.get('event_id') else [],
+                    'trust_level': 'platinum',
+                    'weight_multiplier': 1.0
+                }
+        except Exception as e:
+            print(f"Error fetching intake for {profile_id}: {e}")
+
+        # Fallback to profile fields (Legacy trust)
+        try:
+            profile_result = self.supabase.table("profiles") \
+                .select("offering, seeking, business_focus") \
+                .eq("id", profile_id) \
+                .limit(1) \
+                .execute()
+
+            if profile_result.data:
+                profile = profile_result.data[0]
+                offers = []
+                needs = []
+
+                if profile.get('offering'):
+                    offers = [o.strip() for o in profile['offering'].split(',') if o.strip()]
+                if profile.get('seeking'):
+                    needs = [n.strip() for n in profile['seeking'].split(',') if n.strip()]
+
+                return {
+                    'offers': offers,
+                    'needs': needs,
+                    'match_preference': 'Peer_Bundle',
+                    'events': [],
+                    'trust_level': 'legacy',
+                    'weight_multiplier': 0.3
+                }
+        except Exception as e:
+            print(f"Error fetching profile {profile_id}: {e}")
+
+        return {
+            'offers': [],
+            'needs': [],
+            'match_preference': 'Peer_Bundle',
+            'events': [],
+            'trust_level': 'none',
+            'weight_multiplier': 0.1
+        }
+
+    def _calculate_directional_score(
+        self,
+        target_profile: Dict,
+        candidate_profile: Dict,
+        target_verified: Dict,
+        candidate_verified: Dict
+    ) -> Tuple[float, Dict[str, float]]:
+        """
+        Calculate A → B score
+        Returns: (total_score, component_scores)
+        """
+        # Intent: Does candidate offer what target needs?
+        intent = self.calculate_intent_score(
+            target_verified['needs'],
+            candidate_verified['offers']
+        )
+
+        # Synergy
+        target_reach = (target_profile.get('list_size', 0) or 0) + (target_profile.get('social_reach', 0) or 0)
+        candidate_reach = (candidate_profile.get('list_size', 0) or 0) + (candidate_profile.get('social_reach', 0) or 0)
+
+        synergy = self.calculate_synergy_score(
+            target_profile.get('niche') or target_profile.get('business_focus', ''),
+            candidate_profile.get('niche') or candidate_profile.get('business_focus', ''),
+            target_verified['match_preference'],
+            target_reach,
+            candidate_reach
+        )
+
+        # Momentum
+        momentum = self.calculate_momentum_score(candidate_profile.get('last_active_at'))
+
+        # Context
+        context = self.calculate_context_score(
+            target_verified.get('events', []),
+            candidate_verified.get('events', [])
+        )
+
+        # Weighted total
+        total = (
+            self.WEIGHTS['intent'] * intent +
+            self.WEIGHTS['synergy'] * synergy +
+            self.WEIGHTS['momentum'] * momentum +
+            self.WEIGHTS['context'] * context
+        )
+
+        components = {
+            'intent': intent,
+            'synergy': synergy,
+            'momentum': momentum,
+            'context': context
+        }
+
+        return total, components
+
+    def _generate_reason(self, target: Dict, candidate: Dict, components: Dict, trust_level: str) -> str:
+        """Generate explainable match reason string"""
+        parts = []
+
+        if components['intent'] > 0.5:
+            parts.append(f"You need what {candidate.get('name', 'they')} offers")
+
+        if components['synergy'] > 0.7:
+            parts.append("Strong business alignment")
+        elif components['synergy'] > 0.4:
+            parts.append("Complementary niches")
+
+        if components['momentum'] > 0.8:
+            parts.append("Very active recently")
+        elif components['momentum'] < 0.4:
+            parts.append("Less active (30+ days)")
+
+        if components['context'] > 0:
+            parts.append("Attended same event(s)")
+
+        if trust_level == 'platinum':
+            parts.append("✅ Verified intent")
+        elif trust_level == 'legacy':
+            parts.append("⚠️ Based on profile data")
+
+        return ". ".join(parts) if parts else "Potential partnership opportunity"
+
+    def apply_popularity_cap(
+        self,
+        all_matches: List[Dict],
+        match_cycle_id: str
+    ) -> List[Dict]:
+        """
+        Post-processing: Limit how often any profile appears in Top 3
+
+        Rule: A single profile cannot appear in Top 3 for more than
+        POPULARITY_CAP (5) distinct users per cycle.
+        """
+        from collections import defaultdict
+
+        appearance_count = defaultdict(int)
+        filtered_matches = []
+
+        # Group matches by target profile
+        by_profile = defaultdict(list)
+        for match in all_matches:
+            by_profile[match['profile_id']].append(match)
+
+        # Sort each profile's matches and count Top 3 appearances
+        for profile_id, matches in by_profile.items():
+            matches.sort(key=lambda x: x['harmonic_mean'], reverse=True)
+            for rank, match in enumerate(matches):
+                match['rank'] = rank + 1
+                suggested_id = match['suggested_profile_id']
+
+                if rank < 3:  # Top 3
+                    if appearance_count[suggested_id] < self.POPULARITY_CAP:
+                        appearance_count[suggested_id] += 1
+                        filtered_matches.append(match)
+                    # else: skip - over popular
+                else:
+                    filtered_matches.append(match)
+
+        # Store popularity counts for analytics
+        try:
+            for profile_id, count in appearance_count.items():
+                self.supabase.table("match_popularity").upsert({
+                    'profile_id': profile_id,
+                    'match_cycle_id': match_cycle_id,
+                    'top_3_appearances': count
+                }, on_conflict="profile_id,match_cycle_id").execute()
+        except Exception as e:
+            print(f"Error updating popularity: {e}")
+
+        return filtered_matches
+
+    def generate_all_matches(
+        self,
+        match_cycle_id: str,
+        top_n: int = 10,
+        min_score: float = 15.0
+    ) -> Dict:
+        """
+        Generate V1 matches for all profiles with verified intent or fallback data
+
+        Args:
+            match_cycle_id: Unique ID for this match cycle (e.g., "2025-01-cycle")
+            top_n: Number of top matches per profile
+            min_score: Minimum harmonic mean score (0-100 scale)
+
+        Returns:
+            Dict with success status and statistics
+        """
+        print(f"Starting V1 match generation for cycle: {match_cycle_id}")
+
+        # Get all profiles
+        try:
+            profiles_result = self.supabase.table("profiles").select("*").execute()
+            all_profiles = profiles_result.data or []
+        except Exception as e:
+            return {'success': False, 'error': f'Failed to fetch profiles: {e}'}
+
+        print(f"Found {len(all_profiles)} profiles")
+
+        # Pre-fetch verified data for all profiles
+        profile_data = {}
+        for profile in all_profiles:
+            pid = profile['id']
+            profile_data[pid] = {
+                'profile': profile,
+                'verified': self._get_verified_data(pid)
+            }
+
+        all_matches = []
+        profiles_processed = 0
+
+        for target_id, target_info in profile_data.items():
+            target_profile = target_info['profile']
+            target_verified = target_info['verified']
+
+            for candidate_id, candidate_info in profile_data.items():
+                if candidate_id == target_id:
+                    continue
+
+                candidate_profile = candidate_info['profile']
+                candidate_verified = candidate_info['verified']
+
+                # Calculate bidirectional scores
+                score_ab, components_ab = self._calculate_directional_score(
+                    target_profile, candidate_profile, target_verified, candidate_verified
+                )
+                score_ba, components_ba = self._calculate_directional_score(
+                    candidate_profile, target_profile, candidate_verified, target_verified
+                )
+
+                # Harmonic mean (scale to 0-100)
+                harmonic = self.calculate_harmonic_mean(score_ab, score_ba) * 100
+
+                # Apply trust level weighting
+                trust_weight = min(target_verified['weight_multiplier'], candidate_verified['weight_multiplier'])
+                weighted_score = harmonic * trust_weight
+
+                if weighted_score < min_score:
+                    continue
+
+                all_matches.append({
+                    'profile_id': target_id,
+                    'suggested_profile_id': candidate_id,
+                    'score_ab': round(score_ab * 100, 2),
+                    'score_ba': round(score_ba * 100, 2),
+                    'harmonic_mean': round(harmonic, 2),
+                    'match_score': round(weighted_score, 2),
+                    'scale_symmetry_score': round(components_ab['synergy'], 2),
+                    'trust_level': target_verified['trust_level'],
+                    'match_reason': self._generate_reason(
+                        target_profile, candidate_profile, components_ab, target_verified['trust_level']
+                    )
+                })
+
+            profiles_processed += 1
+            if profiles_processed % 100 == 0:
+                print(f"Processed {profiles_processed}/{len(all_profiles)} profiles...")
+
+        # Apply popularity cap
+        filtered_matches = self.apply_popularity_cap(all_matches, match_cycle_id)
+
+        # Save to database (keep only top_n per profile)
+        from collections import defaultdict
+        by_profile = defaultdict(list)
+        for match in filtered_matches:
+            by_profile[match['profile_id']].append(match)
+
+        saved = 0
+        for profile_id, matches in by_profile.items():
+            matches.sort(key=lambda x: x['harmonic_mean'], reverse=True)
+            for match in matches[:top_n]:
+                try:
+                    self.supabase.table("match_suggestions").upsert(
+                        match,
+                        on_conflict="profile_id,suggested_profile_id"
+                    ).execute()
+                    saved += 1
+                except Exception as e:
+                    print(f"Error saving match: {e}")
+
+        print(f"V1 match generation complete: {saved} matches saved")
+
+        return {
+            'success': True,
+            'profiles_processed': profiles_processed,
+            'matches_created': saved,
+            'match_cycle_id': match_cycle_id
+        }
+
+    def generate_matches_for_user(self, profile_id: str, top_n: int = 10) -> Dict:
+        """Generate V1 matches for a specific user"""
+        # Get target profile
+        result = self.directory_service.get_profile_by_id(profile_id)
+        if not result.get('success') or not result.get('data'):
+            return {'success': False, 'error': 'Profile not found'}
+
+        target_profile = result['data']
+        target_verified = self._get_verified_data(profile_id)
+
+        # Get all profiles
+        all_result = self.directory_service.get_all_profiles_for_matching()
+        if not all_result:
+            return {'success': False, 'error': 'Failed to fetch profiles'}
+
+        matches = []
+        for candidate in all_result:
+            if candidate['id'] == profile_id:
+                continue
+
+            candidate_verified = self._get_verified_data(candidate['id'])
+
+            score_ab, components_ab = self._calculate_directional_score(
+                target_profile, candidate, target_verified, candidate_verified
+            )
+            score_ba, components_ba = self._calculate_directional_score(
+                candidate, target_profile, candidate_verified, target_verified
+            )
+
+            harmonic = self.calculate_harmonic_mean(score_ab, score_ba) * 100
+            trust_weight = min(target_verified['weight_multiplier'], candidate_verified['weight_multiplier'])
+            weighted_score = harmonic * trust_weight
+
+            if weighted_score >= 15.0:
+                matches.append({
+                    'profile_id': profile_id,
+                    'suggested_profile_id': candidate['id'],
+                    'profile': candidate,
+                    'score_ab': round(score_ab * 100, 2),
+                    'score_ba': round(score_ba * 100, 2),
+                    'harmonic_mean': round(harmonic, 2),
+                    'match_score': round(weighted_score, 2),
+                    'trust_level': target_verified['trust_level'],
+                    'match_reason': self._generate_reason(
+                        target_profile, candidate, components_ab, target_verified['trust_level']
+                    )
+                })
+
+        # Sort and keep top N
+        matches.sort(key=lambda x: x['harmonic_mean'], reverse=True)
+        matches = matches[:top_n]
+
+        # Save to database
+        saved = 0
+        for match in matches:
+            match_copy = {k: v for k, v in match.items() if k != 'profile'}
+            try:
+                self.supabase.table("match_suggestions").upsert(
+                    match_copy,
+                    on_conflict="profile_id,suggested_profile_id"
+                ).execute()
+                saved += 1
+            except Exception as e:
+                print(f"Error saving match: {e}")
+
+        return {
+            'success': True,
+            'matches_created': saved,
+            'matches': matches
+        }
+
+
+def get_matcher(use_ai: bool = False, use_hybrid: bool = False, use_conversation: bool = False, use_v1: bool = False, api_key: Optional[str] = None):
     """Factory function to get appropriate matcher"""
+    if use_v1:
+        return V1MatchGenerator(api_key)
     if use_conversation:
         return ConversationAwareMatchGenerator(api_key)
     if use_hybrid:

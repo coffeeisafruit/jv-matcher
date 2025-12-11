@@ -23,7 +23,7 @@ from services.pdf_generator import PDFGenerator
 try:
     from auth_service import AuthService, init_session_state
     from directory_service import DirectoryService
-    from match_generator import MatchGenerator, AIMatchGenerator, HybridMatchGenerator, ConversationAwareMatchGenerator
+    from match_generator import MatchGenerator, AIMatchGenerator, HybridMatchGenerator, ConversationAwareMatchGenerator, V1MatchGenerator
     from profile_extractor import AIProfileExtractor
     from conversation_analyzer import ConversationAnalyzer
     SUPABASE_AVAILABLE = True
@@ -385,7 +385,7 @@ def show_main_app():
         st.markdown("---")
 
         # Navigation pages - regular users
-        pages = ["Dashboard", "Directory", "My Matches", "My Preferences", "My Connections"]
+        pages = ["Dashboard", "Directory", "My Matches", "Post-Event Check-in", "My Preferences", "My Connections"]
         if is_admin:
             # Admin gets Process Transcripts and Admin panel
             pages.insert(2, "Process Transcripts")
@@ -411,6 +411,8 @@ def show_main_app():
         show_process_transcripts()
     elif page == "My Matches":
         show_matches()
+    elif page == "Post-Event Check-in":
+        show_post_event_intake()
     elif page == "My Preferences":
         show_preferences()
     elif page == "My Connections":
@@ -1409,31 +1411,31 @@ def show_matches():
                     st.error(f"Error generating report: {str(e)}")
 
     with col_refresh:
-        if st.button("Refresh My Matches", type="secondary", help="Regenerate matches and AI analysis based on your profile"):
+        if st.button("Refresh My Matches (V1)", type="secondary", help="Regenerate matches using V1 Harmonic Mean algorithm"):
             try:
                 import os
 
                 # Show progress
                 status_text = st.empty()
-                status_text.info("Finding your best matches and generating AI analysis... This may take 30-60 seconds.")
+                status_text.info("🧠 Running V1 Match Algorithm with Harmonic Mean scoring... This may take 30-60 seconds.")
 
-                # Use hybrid matcher if OpenAI key available
+                # Use V1 matcher for reciprocal scoring
                 if os.getenv("OPENAI_API_KEY"):
-                    generator = HybridMatchGenerator()
+                    generator = V1MatchGenerator()
+                    result = generator.generate_matches_for_user(user_profile['id'], top_n=10)
                 else:
-                    generator = MatchGenerator()
-
-                result = generator.generate_matches_for_user(user_profile['id'], top_n=10)
+                    # Fallback to hybrid if no OpenAI key
+                    generator = HybridMatchGenerator()
+                    result = generator.generate_matches_for_user(user_profile['id'], top_n=10)
 
                 status_text.empty()
 
                 if result.get('success'):
                     matches_count = result.get('matches_created', 0)
-                    analyses_count = result.get('rich_analyses_generated', 0)
 
                     st.session_state['matches_refreshed'] = True
                     st.session_state['matches_count'] = matches_count
-                    st.session_state['analyses_count'] = analyses_count
+                    st.session_state['analyses_count'] = 0
                     st.rerun()
                 else:
                     st.error(f"Error: {result.get('error', 'Unknown error')}")
@@ -1572,6 +1574,45 @@ def show_matches():
                         st.caption(f"Reach: {suggested['social_reach']:,}")
                     if suggested.get('list_size'):
                         st.caption(f"List: {suggested['list_size']:,}")
+
+                    # V1 Trust Level Badge
+                    trust_level = match.get('trust_level', '')
+                    if trust_level == 'platinum':
+                        st.success("✅ Verified Intent")
+                    elif trust_level == 'legacy':
+                        st.warning("⚠️ Profile Data")
+
+                # V1 Score Breakdown Section
+                harmonic_mean = match.get('harmonic_mean')
+                score_ab = match.get('score_ab')
+                score_ba = match.get('score_ba')
+
+                if harmonic_mean is not None:
+                    with st.expander("📊 V1 Score Breakdown"):
+                        col_a, col_b, col_c = st.columns(3)
+
+                        with col_a:
+                            st.metric("A→B Score", f"{score_ab:.1f}" if score_ab else "N/A")
+                            st.caption("What they offer you")
+
+                        with col_b:
+                            st.metric("B→A Score", f"{score_ba:.1f}" if score_ba else "N/A")
+                            st.caption("What you offer them")
+
+                        with col_c:
+                            st.metric("Harmonic Mean", f"{harmonic_mean:.1f}" if harmonic_mean else "N/A")
+                            st.caption("Reciprocal match quality")
+
+                        # Scale Symmetry
+                        scale_symmetry = match.get('scale_symmetry_score')
+                        if scale_symmetry is not None:
+                            st.markdown(f"**Scale Symmetry:** {scale_symmetry:.1%}")
+                            st.caption("Business size alignment (higher = better peer match)")
+
+                        # Match reason with V1 explanations
+                        if match.get('match_reason'):
+                            st.markdown("---")
+                            st.markdown(f"**Why:** {match['match_reason']}")
 
                 # Rich Analysis Section
                 rich_analysis = match.get('rich_analysis')
@@ -1765,6 +1806,172 @@ def show_matches():
                             st.rerun()
     else:
         st.info("No match suggestions yet. Check back after matches are generated.")
+
+# ==========================================
+# POST-EVENT INTAKE (V1 Platinum Data)
+# ==========================================
+
+def show_post_event_intake(event_name: str = None, event_id: str = None):
+    """
+    Post-Event Check-in: 60-second intake form for Platinum-level verified offers/needs.
+
+    This is the "Magic Moment" where users confirm what they're offering and seeking,
+    upgrading Bronze (AI-extracted) data to Platinum (user-verified) trust level.
+
+    Args:
+        event_name: Optional event name for display
+        event_id: Optional event identifier for tracking
+    """
+    # Header
+    if event_name:
+        st.markdown(f'<div class="main-header">🎯 Post-Event Check-in: {event_name}</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="main-header">🎯 Post-Event Check-in</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="sub-header">Confirm what you\'re offering and seeking to get better matches</div>', unsafe_allow_html=True)
+
+    # Check for user profile
+    user_profile = st.session_state.get('user_profile')
+    if not user_profile:
+        st.warning("Please log in first to submit your offers and needs")
+        return
+
+    # Get DirectoryService
+    directory_service = DirectoryService(use_admin=True)
+
+    # Pre-fill logic - get Bronze data from profile
+    suggested_offers = []
+    suggested_needs = []
+
+    # Parse offering and seeking from profile (Bronze trust level)
+    if user_profile.get('offering'):
+        offering_text = user_profile['offering']
+        offers = [o.strip() for o in offering_text.split('\n') if o.strip()]
+        if not offers:
+            offers = [o.strip() for o in offering_text.split(',') if o.strip()]
+        suggested_offers = offers[:2]
+
+    if user_profile.get('seeking'):
+        seeking_text = user_profile['seeking']
+        needs = [n.strip() for n in seeking_text.split('\n') if n.strip()]
+        if not needs:
+            needs = [n.strip() for n in seeking_text.split(',') if n.strip()]
+        suggested_needs = needs[:2]
+
+    # Intake form
+    with st.form("post_event_intake"):
+        st.markdown("### What You're Offering")
+        st.caption("Max 2 offers - be specific about what value you can provide")
+
+        offer_1 = st.text_input(
+            "Offer 1",
+            value=suggested_offers[0] if len(suggested_offers) > 0 else "",
+            placeholder="e.g., Free 30-min strategy call for health coaches",
+            key="offer_1"
+        )
+
+        offer_2 = st.text_input(
+            "Offer 2",
+            value=suggested_offers[1] if len(suggested_offers) > 1 else "",
+            placeholder="e.g., Access to my email list of 10K entrepreneurs",
+            key="offer_2"
+        )
+
+        st.markdown("---")
+        st.markdown("### What You're Seeking")
+        st.caption("Max 2 needs - what partnerships would help you most right now?")
+
+        need_1 = st.text_input(
+            "Need 1",
+            value=suggested_needs[0] if len(suggested_needs) > 0 else "",
+            placeholder="e.g., JV partner with audience of busy executives",
+            key="need_1"
+        )
+
+        need_2 = st.text_input(
+            "Need 2",
+            value=suggested_needs[1] if len(suggested_needs) > 1 else "",
+            placeholder="e.g., Podcast guest opportunities in business niche",
+            key="need_2"
+        )
+
+        st.markdown("---")
+        st.markdown("### Match Type Preference")
+        st.caption("What kind of partnership are you primarily looking for?")
+
+        match_preference = st.radio(
+            "Match Type",
+            options=[
+                "Peer_Bundle",
+                "Referral_Upstream",
+                "Referral_Downstream",
+                "Service_Provider"
+            ],
+            format_func=lambda x: {
+                "Peer_Bundle": "🤝 Peer/Bundle - Same niche, let's collaborate",
+                "Referral_Upstream": "⬆️ Referral Partner - Serves clients BEFORE they need me",
+                "Referral_Downstream": "⬇️ Referral Partner - Serves clients AFTER they work with me",
+                "Service_Provider": "🔧 Service Provider - A vendor/service I need"
+            }[x],
+            key="match_preference",
+            label_visibility="collapsed"
+        )
+
+        # Submit button
+        submitted = st.form_submit_button("✅ Confirm & Update My Matches", type="primary", use_container_width=True)
+
+        if submitted:
+            # Build verified offers and needs (filter out empty)
+            verified_offers = [o.strip() for o in [offer_1, offer_2] if o and o.strip()]
+            verified_needs = [n.strip() for n in [need_1, need_2] if n and n.strip()]
+
+            # Validate - at least one offer or need required
+            if not verified_offers and not verified_needs:
+                st.error("Please provide at least one offer or need")
+                return
+
+            try:
+                # Generate event_id if not provided
+                final_event_id = event_id or f"manual_{datetime.now().strftime('%Y%m%d')}"
+
+                # Save intake submission
+                result = directory_service.save_intake_submission(
+                    profile_id=user_profile['id'],
+                    event_id=final_event_id,
+                    event_name=event_name or "Manual Check-in",
+                    verified_offers=verified_offers,
+                    verified_needs=verified_needs,
+                    match_preference=match_preference,
+                    suggested_offers=suggested_offers,
+                    suggested_needs=suggested_needs
+                )
+
+                if result.get('success'):
+                    # Update profile's last_active_at for momentum scoring
+                    directory_service.update_profile_last_active(user_profile['id'])
+
+                    st.success("✅ Your offers and needs have been confirmed!")
+
+                    # Show what was saved
+                    st.markdown("---")
+                    st.markdown("### Saved Successfully")
+                    if verified_offers:
+                        st.markdown(f"**Offers:** {', '.join(verified_offers)}")
+                    if verified_needs:
+                        st.markdown(f"**Needs:** {', '.join(verified_needs)}")
+                    st.markdown(f"**Match Type:** {match_preference.replace('_', ' ')}")
+
+                    st.info("🔄 Your matches are being updated with your verified preferences. Check 'My Matches' to see updated recommendations!")
+
+                    # Set flag and rerun
+                    st.session_state['intake_submitted'] = True
+                    st.rerun()
+                else:
+                    st.error(f"Failed to save intake: {result.get('error', 'Unknown error')}")
+
+            except Exception as e:
+                st.error(f"Error saving intake: {str(e)}")
+
 
 # ==========================================
 # MY PREFERENCES

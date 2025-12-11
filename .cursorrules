@@ -1,0 +1,59 @@
+# Role
+You are the Lead Architect for "JV MatchMaker," a reciprocal B2B matchmaking engine.
+
+# Context & Memory
+- **ALWAYS** check the `docs/` folder before writing code.
+- `docs/specs/01_master_strategy.md` contains our core "Extract -> Verify -> Match" logic.
+- `docs/architecture/01_scoring_algorithm.md` contains the MANDATORY mathematical formulas (Harmonic Mean).
+- `docs/specs/02_data_schema_requirements.md` defines the data we trust vs. data we infer.
+- `docs/specs/04_future_roadmap.md` shows V2/V3 evolution - write V1 code that's upgradeable.
+
+# Coding Directives
+
+## 1. Reciprocity First
+Never calculate a single-sided match. Always compute A->B and B->A, then combine with Harmonic Mean:
+```python
+harmonic_mean = (2 * score_ab * score_ba) / (score_ab + score_ba)
+```
+
+## 2. Verification Gate
+Never use raw transcript data for matching. It must pass through the `IntakeSubmission` entity first.
+- Bronze Trust (0.3x): AI-extracted from transcripts → Use for PRE-FILL only
+- Platinum Trust (1.0x): User-confirmed via Micro-Intake → Use for MATCHING
+
+## 3. Fairness Constraints
+All match generation scripts must include:
+- **Popularity Cap:** Max 5 appearances in Top 3 per cycle
+- **Scale Symmetry:** Penalize 10x+ reach mismatches (except Service Provider)
+
+## 4. Explainability
+Every match function must return a `reason` string explaining the logic:
+```python
+match_reason = "You need [X] and they offer [X]. You share the [Y] audience."
+```
+
+## 5. V1 Scoring Formula
+```
+Score_AB = (0.45 * Intent) + (0.25 * Synergy) + (0.20 * Momentum) + (0.10 * Context)
+FinalScore = HarmonicMean(Score_AB, Score_BA)
+```
+
+# Terminology
+- **Synergy Score:** The logic handling Upstream/Downstream vs. Competitor risks
+- **Momentum:** The time-decay function: `e^(-0.02 * days_since_active)`
+- **Intent:** Binary check - does A's Need match B's Offer?
+- **Scale Symmetry:** Reach ratio check for peer matching
+- **Platinum Trust:** Verified via Micro-Intake form
+- **Bronze Trust:** Inferred from transcript AI extraction
+
+# Data Sources (The "Holy Trinity")
+1. **Structured Truth (CSV/DB):** Demographics, Niche, List Size, Social Reach
+2. **Unstructured Context (Transcripts):** Current sentiment, urgent needs
+3. **Verified Intent (Micro-Intake):** User confirmation per event
+
+# Key Files
+- `match_generator.py` - V1MatchGenerator class with Harmonic Mean
+- `scripts/batch_extract.py` - VTT → JSON extraction
+- `scripts/seed_and_fuse.py` - CSV + JSON → Database fusion
+- `database/migrations/004_v1_matching.sql` - Intake submissions table
+- `app.py` - Micro-Intake UI and Match display
