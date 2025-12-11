@@ -2152,7 +2152,7 @@ def show_admin():
         st.error("Admin access required")
         return
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Add Profile", "Import CSV", "Export", "Generate Matches", "Analytics", "Pending Reviews"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Add Profile", "Import CSV", "Export", "Generate Matches", "V1 Matches", "Analytics", "Pending Reviews"])
 
     with tab1:
         show_add_profile_form()
@@ -2167,9 +2167,12 @@ def show_admin():
         show_generate_matches()
 
     with tab5:
-        show_analytics()
+        show_v1_matches_admin()
 
     with tab6:
+        show_analytics()
+
+    with tab7:
         show_pending_reviews()
 
 def show_add_profile_form():
@@ -2264,6 +2267,175 @@ def show_export_section():
                 mime="text/csv"
             )
             st.success(f"{len(df)} profiles exported")
+
+def show_v1_matches_admin():
+    """Admin panel for V1 Match Generation with Harmonic Mean scoring"""
+    st.markdown("### V1 Match Generation (Harmonic Mean Algorithm)")
+
+    st.markdown("""
+    **V1 Scoring Formula:**
+    - Score_AB = (0.45 × Intent) + (0.25 × Synergy) + (0.20 × Momentum) + (0.10 × Context)
+    - Final = HarmonicMean(AB, BA) = (2 × AB × BA) / (AB + BA)
+    - Trust Weight: Platinum (1.0×), Gold (0.7×), Legacy (0.3×)
+    """)
+
+    has_openai_key = bool(os.getenv("OPENAI_API_KEY"))
+
+    if has_openai_key:
+        st.success("✅ OPENAI_API_KEY detected - V1 semantic matching enabled")
+    else:
+        st.warning("⚠️ No OPENAI_API_KEY - V1 will use keyword fallback for intent matching")
+
+    st.markdown("---")
+
+    # Generation Settings
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        top_n = st.number_input("Matches per profile", min_value=1, max_value=50, value=10, key="v1_top_n")
+    with col2:
+        min_score = st.slider("Minimum score", min_value=0, max_value=30, value=5, key="v1_min_score")
+    with col3:
+        match_cycle_id = st.text_input("Match Cycle ID", value=f"admin-{datetime.now().strftime('%Y%m%d-%H%M')}", key="v1_cycle")
+
+    st.markdown("---")
+
+    # Generate All Matches
+    col_gen, col_view = st.columns(2)
+
+    with col_gen:
+        st.markdown("#### Generate V1 Matches")
+        if st.button("🚀 Generate V1 Matches for ALL Users", type="primary", key="v1_generate_all"):
+            with st.spinner("Running V1 match generation... This may take several minutes for large datasets."):
+                try:
+                    generator = V1MatchGenerator()
+                    result = generator.generate_all_matches(
+                        match_cycle_id=match_cycle_id,
+                        top_n=top_n,
+                        min_score=float(min_score)
+                    )
+
+                    if result.get('success'):
+                        st.success("✅ V1 Match Generation Complete!")
+                        st.metric("Profiles Processed", result.get('profiles_processed', 0))
+                        st.metric("Matches Created", result.get('matches_created', 0))
+                    else:
+                        st.error(f"Error: {result.get('error', 'Unknown error')}")
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+
+    with col_view:
+        st.markdown("#### View All V1 Matches")
+        if st.button("📊 Load All V1 Matches", key="v1_view_all"):
+            st.session_state['show_v1_matches'] = True
+
+    st.markdown("---")
+
+    # Display All Matches
+    if st.session_state.get('show_v1_matches'):
+        st.markdown("### All V1 Match Results")
+
+        directory_service = DirectoryService(use_admin=True)
+
+        # Query all match suggestions with V1 fields
+        try:
+            # Get matches with V1 data
+            result = directory_service.client.table("match_suggestions") \
+                .select("*, profile:profile_id(name, company), suggested:suggested_profile_id(name, company)") \
+                .not_.is_("harmonic_mean", "null") \
+                .order("harmonic_mean", desc=True) \
+                .limit(500) \
+                .execute()
+
+            matches = result.data or []
+
+            if matches:
+                st.success(f"Found {len(matches)} V1 matches (showing top 500)")
+
+                # Summary stats
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    avg_harmonic = sum(m.get('harmonic_mean', 0) or 0 for m in matches) / len(matches)
+                    st.metric("Avg Harmonic Mean", f"{avg_harmonic:.1f}")
+                with col2:
+                    platinum = sum(1 for m in matches if m.get('trust_level') == 'platinum')
+                    st.metric("Platinum Trust", platinum)
+                with col3:
+                    legacy = sum(1 for m in matches if m.get('trust_level') == 'legacy')
+                    st.metric("Legacy Trust", legacy)
+                with col4:
+                    unique_profiles = len(set(m.get('profile_id') for m in matches))
+                    st.metric("Unique Profiles", unique_profiles)
+
+                # Filter options
+                col_filter1, col_filter2 = st.columns(2)
+                with col_filter1:
+                    min_harmonic = st.slider("Min Harmonic Mean", 0, 100, 0, key="v1_filter_harmonic")
+                with col_filter2:
+                    trust_filter = st.multiselect("Trust Level", ["platinum", "gold", "legacy", "none"], default=["platinum", "gold", "legacy", "none"], key="v1_filter_trust")
+
+                # Filter matches
+                filtered = [m for m in matches
+                           if (m.get('harmonic_mean', 0) or 0) >= min_harmonic
+                           and m.get('trust_level', 'legacy') in trust_filter]
+
+                st.markdown(f"**Showing {len(filtered)} matches**")
+
+                # Display as expandable cards
+                for i, match in enumerate(filtered[:100]):  # Limit display to 100
+                    profile_name = match.get('profile', {}).get('name', 'Unknown') if match.get('profile') else 'Unknown'
+                    suggested_name = match.get('suggested', {}).get('name', 'Unknown') if match.get('suggested') else 'Unknown'
+                    harmonic = match.get('harmonic_mean', 0) or 0
+                    score_ab = match.get('score_ab', 0) or 0
+                    score_ba = match.get('score_ba', 0) or 0
+                    trust = match.get('trust_level', 'legacy')
+                    reason = match.get('match_reason', 'N/A')
+
+                    trust_emoji = {"platinum": "💎", "gold": "🥇", "legacy": "📋", "none": "❓"}.get(trust, "❓")
+
+                    with st.expander(f"{i+1}. {profile_name} ↔️ {suggested_name} | HM: {harmonic:.1f} {trust_emoji}"):
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("A→B Score", f"{score_ab:.1f}")
+                        with col2:
+                            st.metric("B→A Score", f"{score_ba:.1f}")
+                        with col3:
+                            st.metric("Harmonic Mean", f"{harmonic:.1f}")
+
+                        st.markdown(f"**Trust Level:** {trust_emoji} {trust.title()}")
+                        st.markdown(f"**Match Reason:** {reason}")
+
+                        if match.get('scale_symmetry_score'):
+                            st.markdown(f"**Scale Symmetry:** {match.get('scale_symmetry_score'):.2f}")
+
+                # Export option
+                st.markdown("---")
+                if st.button("📥 Export V1 Matches to CSV", key="v1_export"):
+                    import pandas as pd
+                    export_data = []
+                    for m in filtered:
+                        export_data.append({
+                            'Profile': m.get('profile', {}).get('name', '') if m.get('profile') else '',
+                            'Suggested': m.get('suggested', {}).get('name', '') if m.get('suggested') else '',
+                            'Score_AB': m.get('score_ab', 0),
+                            'Score_BA': m.get('score_ba', 0),
+                            'Harmonic_Mean': m.get('harmonic_mean', 0),
+                            'Trust_Level': m.get('trust_level', ''),
+                            'Match_Reason': m.get('match_reason', ''),
+                            'Scale_Symmetry': m.get('scale_symmetry_score', '')
+                        })
+                    df = pd.DataFrame(export_data)
+                    csv = df.to_csv(index=False)
+                    st.download_button(
+                        "Download CSV",
+                        data=csv,
+                        file_name=f"v1_matches_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv"
+                    )
+            else:
+                st.warning("No V1 matches found. Click 'Generate V1 Matches for ALL Users' to create them.")
+
+        except Exception as e:
+            st.error(f"Error loading matches: {str(e)}")
 
 def show_generate_matches():
     """Generate match suggestions"""
