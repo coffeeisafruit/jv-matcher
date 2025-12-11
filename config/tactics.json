@@ -1,0 +1,37 @@
+{
+  "version": "1.5",
+  "intake_questions": {
+    "anti_personas": [
+      {"id": "no_beginners", "label": "No Beginners", "description": "Exclude people new to business"},
+      {"id": "no_service_providers", "label": "No Service Providers", "description": "Exclude vendors/agencies"},
+      {"id": "no_competitors", "label": "No Competitors", "description": "Exclude same-niche competitors"}
+    ]
+  },
+  "confidence_tiers": {
+    "gold": {"min_score": 60, "label": "Top Pick", "emoji": "🔥", "color": "#FFD700"},
+    "silver": {"min_score": 40, "label": "Strong Match", "emoji": "✅", "color": "#C0C0C0"},
+    "bronze": {"min_score": 20, "label": "Discovery", "emoji": "👀", "color": "#CD7F32"}
+  },
+  "intro_templates": {
+    "Peer_Bundle": {
+      "subject": "Partnership Opportunity - {name}",
+      "body": "Hi {name},\n\nI noticed we're both focused on {niche} and thought there could be a great collaboration opportunity.\n\nI specialize in {my_offering} and I'm looking for {my_need}.\n\nYour work with {audience} really resonates with me. Would you be open to a quick 15-min call?\n\nBest,\n{my_name}"
+    },
+    "Referral_Upstream": {
+      "subject": "Potential Referral Partnership",
+      "body": "Hi {name},\n\nI work with clients who often need support BEFORE they're ready for my services in {niche}.\n\nYour expertise in {their_offering} makes you a perfect upstream partner. I'd love to explore sending referrals your way.\n\nCould we connect?\n\nBest,\n{my_name}"
+    },
+    "Referral_Downstream": {
+      "subject": "Referral Opportunity",
+      "body": "Hi {name},\n\nAfter my clients finish working with me on {my_offering}, they often need exactly what you offer ({their_offering}).\n\nI think we could create a great referral flow.\n\nInterested in a quick call?\n\nBest,\n{my_name}"
+    },
+    "Service_Provider": {
+      "subject": "Service Inquiry",
+      "body": "Hi {name},\n\nI'm {my_name} and I'm looking for support with {my_need}.\n\nYour expertise in {their_offering} caught my attention. Do you have 15 minutes this week for a quick intro call?\n\nBest,\n{my_name}"
+    }
+  },
+  "feedback_options": {
+    "tags": ["Great conversation", "Deal in progress", "Not a fit", "Ghosted", "Referred elsewhere"]
+  },
+  "match_expiry_days": 7
+}

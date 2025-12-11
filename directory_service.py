@@ -4,7 +4,7 @@ Handles all profile/directory database operations
 Schema v2: contacts = profiles (unified)
 """
 import pandas as pd
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional, Set, Union
 from supabase_client import get_client, get_admin_client
 
 class DirectoryService:
@@ -299,6 +299,73 @@ class DirectoryService:
             return {"success": True}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    # ==========================================
+    # V1.5: FEEDBACK LOOP METHODS
+    # ==========================================
+
+    def save_match_outcome(
+        self,
+        match_id: str,
+        meeting_happened: Optional[bool] = None,
+        star_rating: Optional[int] = None,
+        feedback_tags: Optional[List[str]] = None,
+        feedback_text: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Save detailed feedback for a match outcome (V1.5 Feedback Loop).
+        Uses upsert to handle both new feedback and updates.
+        """
+        try:
+            outcome_data = {"match_id": match_id}
+
+            if meeting_happened is not None:
+                outcome_data["meeting_happened"] = meeting_happened
+            if star_rating is not None:
+                outcome_data["star_rating"] = star_rating
+            if feedback_tags is not None:
+                outcome_data["feedback_tags"] = feedback_tags
+            if feedback_text is not None:
+                outcome_data["feedback_text"] = feedback_text
+
+            # Upsert to match_outcomes
+            self.client.table("match_outcomes").upsert(
+                outcome_data,
+                on_conflict="match_id"
+            ).execute()
+
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_match_outcome(self, match_id: str) -> Optional[Dict[str, Any]]:
+        """Get existing feedback for a match"""
+        try:
+            response = self.client.table("match_outcomes") \
+                .select("*") \
+                .eq("match_id", match_id) \
+                .single() \
+                .execute()
+            return response.data
+        except Exception:
+            return None
+
+    def get_past_matches_for_feedback(self, profile_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """
+        Get matches that have been contacted but may need detailed feedback.
+        Used for the Past Matches Feedback section in V1.5.
+        """
+        try:
+            response = self.client.table("match_suggestions") \
+                .select("*, suggested:suggested_profile_id(*), outcome:match_outcomes(*)") \
+                .eq("profile_id", profile_id) \
+                .eq("status", "contacted") \
+                .order("contacted_at", desc=True) \
+                .limit(limit) \
+                .execute()
+            return response.data or []
+        except Exception:
+            return []
 
     def get_dismissed_profile_ids(self, profile_id: str) -> Set[str]:
         """Get IDs of profiles this user has dismissed"""
@@ -921,21 +988,33 @@ class DirectoryService:
         event_name: str,
         verified_offers: List[str],
         verified_needs: List[str],
-        match_preference: str,
-        match_preferences: Optional[List[str]] = None,
+        match_preference: Union[str, List[str]],  # V1.5: Now accepts list for multi-select
+        match_preferences: Optional[List[str]] = None,  # Legacy - kept for backward compat
         suggested_offers: Optional[List[str]] = None,
-        suggested_needs: Optional[List[str]] = None
+        suggested_needs: Optional[List[str]] = None,
+        anti_personas: Optional[List[str]] = None  # V1.5: User exclusion preferences
     ) -> Dict[str, Any]:
         """Upsert intake submission for a profile/event combination"""
         try:
             from datetime import datetime
 
-            # Validate match_preference(s)
             valid_preferences = ['Peer_Bundle', 'Referral_Upstream', 'Referral_Downstream', 'Service_Provider']
-            if match_preference not in valid_preferences:
-                return {"success": False, "error": f"Invalid match_preference. Must be one of: {valid_preferences}"}
 
-            # Validate all preferences in list if provided
+            # V1.5: Normalize match_preference to list
+            if isinstance(match_preference, str):
+                # Legacy single value - wrap in list
+                preferences_list = [match_preference]
+            elif isinstance(match_preference, list):
+                preferences_list = match_preference
+            else:
+                preferences_list = ['Peer_Bundle']
+
+            # Validate all preferences
+            for pref in preferences_list:
+                if pref not in valid_preferences:
+                    return {"success": False, "error": f"Invalid preference '{pref}'. Must be one of: {valid_preferences}"}
+
+            # Also validate match_preferences if provided (legacy)
             if match_preferences:
                 for pref in match_preferences:
                     if pref not in valid_preferences:
@@ -947,11 +1026,11 @@ class DirectoryService:
                 "event_name": event_name,
                 "verified_offers": verified_offers,
                 "verified_needs": verified_needs,
-                "match_preference": match_preference,
+                "match_preference": preferences_list,  # V1.5: Now stored as array
                 "confirmed_at": datetime.utcnow().isoformat()
             }
 
-            # Add match_preferences array if provided
+            # Add match_preferences array if provided (legacy support)
             if match_preferences:
                 insert_data["match_preferences"] = match_preferences
 
@@ -960,6 +1039,10 @@ class DirectoryService:
                 insert_data["suggested_offers"] = suggested_offers
             if suggested_needs is not None:
                 insert_data["suggested_needs"] = suggested_needs
+
+            # V1.5: Add anti_personas if provided
+            if anti_personas is not None:
+                insert_data["anti_personas"] = anti_personas
 
             # Upsert to handle updates for existing profile/event combinations
             response = self.client.table("intake_submissions").upsert(

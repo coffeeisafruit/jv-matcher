@@ -33,6 +33,13 @@ except ImportError:
 from jv_matcher import JVMatcher
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# Config loader for V1.5 tactical features
+try:
+    from config import get_anti_personas, get_confidence_tiers, get_intro_template, get_feedback_options
+    CONFIG_AVAILABLE = True
+except ImportError:
+    CONFIG_AVAILABLE = False
+
 # Page configuration
 st.set_page_config(
     page_title="JV Directory & Matcher",
@@ -100,6 +107,27 @@ st.markdown("""
         padding: 0.2rem 0.5rem;
         border-radius: 0.25rem;
         font-weight: bold;
+    }
+    /* V1.5 Confidence Tier Badges */
+    .tier-badge {
+        padding: 0.3rem 0.6rem;
+        border-radius: 0.5rem;
+        font-weight: bold;
+        font-size: 0.85rem;
+        display: inline-block;
+        margin-left: 0.5rem;
+    }
+    .tier-gold {
+        background: linear-gradient(135deg, #FFD700 0%, #FFA500 100%);
+        color: #000;
+    }
+    .tier-silver {
+        background: linear-gradient(135deg, #C0C0C0 0%, #A9A9A9 100%);
+        color: #000;
+    }
+    .tier-bronze {
+        background: linear-gradient(135deg, #CD7F32 0%, #8B4513 100%);
+        color: #fff;
     }
     .success-box {
         background-color: #d4edda;
@@ -1555,8 +1583,23 @@ def show_matches():
             score = match.get('match_score', 0)
             status = match.get('status', 'pending')
 
+            # V1.5: Calculate confidence tier based on harmonic mean
+            harmonic_mean = match.get('harmonic_mean', 0) or score
+            tier_info = None
+            if harmonic_mean >= 60:
+                tier_info = {'tier': 'gold', 'label': 'Top Pick', 'emoji': '🔥'}
+            elif harmonic_mean >= 40:
+                tier_info = {'tier': 'silver', 'label': 'Strong Match', 'emoji': '✅'}
+            elif harmonic_mean >= 20:
+                tier_info = {'tier': 'bronze', 'label': 'Discovery', 'emoji': '👀'}
+
+            # Build expander title with tier badge
+            expander_title = f"**{suggested.get('name', 'Unknown')}** - {score}/100"
+            if tier_info:
+                expander_title += f" {tier_info['emoji']} {tier_info['label']}"
+
             # Create expandable card for each match
-            with st.expander(f"**{suggested.get('name', 'Unknown')}** - {score}/100", expanded=(status == 'viewed')):
+            with st.expander(expander_title, expanded=(status == 'viewed')):
                 # Header info
                 col1, col2 = st.columns([2, 1])
 
@@ -1569,7 +1612,11 @@ def show_matches():
                         st.markdown(f"**Services:** {suggested['service_provided']}")
 
                 with col2:
-                    st.markdown(f'<span class="match-score">{score}/100</span>', unsafe_allow_html=True)
+                    # Score with V1.5 tier badge
+                    score_html = f'<span class="match-score">{score}/100</span>'
+                    if tier_info:
+                        score_html += f' <span class="tier-badge tier-{tier_info["tier"]}">{tier_info["emoji"]} {tier_info["label"]}</span>'
+                    st.markdown(score_html, unsafe_allow_html=True)
                     if suggested.get('social_reach'):
                         st.caption(f"Reach: {suggested['social_reach']:,}")
                     if suggested.get('list_size'):
@@ -1715,11 +1762,51 @@ def show_matches():
                 st.markdown("---")
                 st.markdown("### Outreach")
 
+                # V1.5: Draft Intro Button (No-Ghost Action)
+                col_draft, col_spacer = st.columns([1, 3])
+                with col_draft:
+                    if st.button("✍️ Draft Intro", key=f"draft_intro_{match['id']}", type="secondary"):
+                        # V1.5: Use winning_preference from match (why THIS person matched)
+                        # Falls back to user's intake preference if not available
+                        match_pref = match.get('winning_preference')
+                        if not match_pref:
+                            user_intake = directory_service.get_latest_intake(user_profile['id'])
+                            intake_pref = user_intake.get('match_preference') if user_intake else None
+                            # Handle array (after migration) or string (legacy)
+                            if isinstance(intake_pref, list):
+                                match_pref = intake_pref[0] if intake_pref else 'Peer_Bundle'
+                            else:
+                                match_pref = intake_pref or 'Peer_Bundle'
+
+                        # Get template based on winning preference (smart selection)
+                        if CONFIG_AVAILABLE:
+                            template = get_intro_template(match_pref)
+                        else:
+                            template = {'body': 'Hi {name},\n\nI think we could have a great collaboration opportunity.\n\nBest,\n{my_name}'}
+
+                        # Fill placeholders
+                        intro_text = template['body'].format(
+                            name=suggested.get('name', 'there'),
+                            niche=suggested.get('business_focus', 'your space') or 'your space',
+                            my_offering=(user_profile.get('offering', 'my expertise') or 'my expertise')[:100],
+                            my_need=(user_profile.get('seeking', 'partnerships') or 'partnerships')[:100],
+                            their_offering=(suggested.get('service_provided', 'your services') or 'your services')[:100],
+                            audience=(suggested.get('who_you_serve', 'your audience') or 'your audience')[:100],
+                            my_name=user_profile.get('name', 'Your Name')
+                        )
+                        st.session_state[f'draft_intro_{match["id"]}'] = intro_text
+
+                # Display generated intro in copyable code block
+                if st.session_state.get(f'draft_intro_{match["id"]}'):
+                    st.markdown("**Your Draft Intro:**")
+                    st.code(st.session_state[f'draft_intro_{match["id"]}'], language=None)
+                    st.caption("📋 Copy the message above and personalize it")
+
                 outreach_message = st.text_area(
-                    "Draft your outreach message",
+                    "Or customize your message",
                     value=initial_outreach,
                     key=f"outreach_{match['id']}",
-                    help="Edit and personalize this AI-generated message"
+                    help="Edit and personalize this message"
                 )
 
                 # Save outreach message if changed
@@ -1730,7 +1817,7 @@ def show_matches():
 
                 # Contact button
                 subject = f"Partnership Opportunity - {user_profile.get('name', 'JV Directory')}"
-                body = outreach_message if outreach_message else f"Hi {suggested.get('name', 'there')},\n\nI came across your profile and think we might have a great partnership opportunity..."
+                body = st.session_state.get(f'draft_intro_{match["id"]}', outreach_message) if st.session_state.get(f'draft_intro_{match["id"]}') else (outreach_message if outreach_message else f"Hi {suggested.get('name', 'there')},\n\nI came across your profile and think we might have a great partnership opportunity...")
 
                 if suggested.get('email'):
                     mailto_link = f"mailto:{suggested['email']}?subject={urllib.parse.quote(subject)}&body={urllib.parse.quote(body)}"
@@ -1804,7 +1891,87 @@ def show_matches():
                         if st.button("Dismiss", key=f"dismiss_{match['id']}", type="secondary"):
                             directory_service.dismiss_match(user_profile['id'], suggested['id'])
                             st.rerun()
+
+    # ==========================================
+    # V1.5: PAST MATCHES FEEDBACK SECTION
+    # ==========================================
+    st.markdown("---")
+    st.markdown("### 📋 Past Matches Feedback")
+    st.caption("Help improve match quality by sharing how your outreach went")
+
+    past_matches = directory_service.get_past_matches_for_feedback(user_profile['id'])
+
+    if past_matches:
+        for pm in past_matches:
+            suggested_pm = pm.get('suggested', {})
+            outcome = pm.get('outcome', [None])[0] if pm.get('outcome') else None
+
+            with st.expander(f"Feedback: {suggested_pm.get('name', 'Unknown')}", expanded=False):
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.markdown("**Did you meet?**")
+                    current_meeting = "Not yet"
+                    if outcome:
+                        if outcome.get('meeting_happened') is True:
+                            current_meeting = "Yes"
+                        elif outcome.get('meeting_happened') is False:
+                            current_meeting = "No"
+                    did_meet = st.radio(
+                        "Meeting status",
+                        ["Not yet", "Yes", "No"],
+                        key=f"did_meet_{pm['id']}",
+                        index=["Not yet", "Yes", "No"].index(current_meeting),
+                        horizontal=True,
+                        label_visibility="collapsed"
+                    )
+
+                with col2:
+                    st.markdown("**Rate this match (1-5 stars)**")
+                    current_rating = outcome.get('star_rating', 3) if outcome else 3
+                    star_rating = st.slider(
+                        "Rating",
+                        min_value=1,
+                        max_value=5,
+                        value=current_rating,
+                        key=f"rating_{pm['id']}",
+                        label_visibility="collapsed"
+                    )
+
+                # Feedback tags
+                if CONFIG_AVAILABLE:
+                    tag_options = get_feedback_options()['tags']
+                else:
+                    tag_options = ["Great conversation", "Deal in progress", "Not a fit", "Ghosted", "Referred elsewhere"]
+
+                current_tags = outcome.get('feedback_tags', []) if outcome else []
+                selected_tags = st.multiselect(
+                    "Quick tags (optional)",
+                    tag_options,
+                    default=current_tags,
+                    key=f"tags_{pm['id']}"
+                )
+
+                # Save feedback button
+                if st.button("💾 Save Feedback", key=f"save_feedback_{pm['id']}"):
+                    meeting_happened = True if did_meet == "Yes" else (False if did_meet == "No" else None)
+
+                    result = directory_service.save_match_outcome(
+                        match_id=pm['id'],
+                        meeting_happened=meeting_happened,
+                        star_rating=star_rating,
+                        feedback_tags=selected_tags
+                    )
+
+                    if result.get('success'):
+                        st.success("Feedback saved! Thank you.")
+                        st.rerun()
+                    else:
+                        st.error(f"Error saving feedback: {result.get('error')}")
     else:
+        st.info("No past matches awaiting feedback. Contact some matches first!")
+
+    if not matches:
         st.info("No match suggestions yet. Check back after matches are generated.")
 
 # ==========================================
@@ -1948,6 +2115,36 @@ def show_post_event_intake(event_name: str = None, event_id: str = None):
         # For backward compatibility, use first preference as primary
         match_preference = match_preferences[0]
 
+        # === V1.5: Anti-Persona Exclusions ===
+        st.markdown("---")
+        st.markdown("### Who to Exclude")
+        st.caption("Filter out people who aren't a good fit (Select all that apply)")
+
+        anti_personas = []
+        if CONFIG_AVAILABLE:
+            anti_persona_options = get_anti_personas()
+            cols = st.columns(3)
+            for i, option in enumerate(anti_persona_options):
+                with cols[i % 3]:
+                    if st.checkbox(
+                        f"{option['label']}",
+                        key=f"anti_{option['id']}",
+                        help=option['description']
+                    ):
+                        anti_personas.append(option['id'])
+        else:
+            # Fallback if config not available
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.checkbox("No Beginners", key="anti_no_beginners", help="Exclude people new to business"):
+                    anti_personas.append("no_beginners")
+            with col2:
+                if st.checkbox("No Service Providers", key="anti_no_service_providers", help="Exclude vendors/agencies"):
+                    anti_personas.append("no_service_providers")
+            with col3:
+                if st.checkbox("No Competitors", key="anti_no_competitors", help="Exclude same-niche competitors"):
+                    anti_personas.append("no_competitors")
+
         # Submit button
         submitted = st.form_submit_button("✅ Confirm & Update My Matches", type="primary", use_container_width=True)
 
@@ -1972,10 +2169,11 @@ def show_post_event_intake(event_name: str = None, event_id: str = None):
                     event_name=event_name or "Manual Check-in",
                     verified_offers=verified_offers,
                     verified_needs=verified_needs,
-                    match_preference=match_preference,
-                    match_preferences=match_preferences,
+                    match_preference=match_preferences,  # V1.5: Now passes full list for multi-select
+                    match_preferences=match_preferences,  # Legacy compat
                     suggested_offers=suggested_offers,
-                    suggested_needs=suggested_needs
+                    suggested_needs=suggested_needs,
+                    anti_personas=anti_personas  # V1.5: User exclusion preferences
                 )
 
                 if result.get('success'):
@@ -2714,4 +2912,6 @@ def show_help():
 
 if __name__ == "__main__":
     main()
+
+
 
