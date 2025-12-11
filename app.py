@@ -423,6 +423,14 @@ def show_main_app():
 
         st.markdown("---")
 
+        # Admin Debug Toggle (God Mode)
+        if is_admin:
+            st.session_state.show_debug_scores = st.checkbox(
+                "🛠️ Show Match Scores",
+                value=st.session_state.get('show_debug_scores', False),
+                help="Toggle to see raw algorithm scores and debug data"
+            )
+
         if st.button("Logout", use_container_width=True):
             auth_service.sign_out()
             st.session_state.authenticated = False
@@ -1595,10 +1603,20 @@ def show_matches():
             else:
                 tier_info = {'tier': 'bronze', 'label': 'Discovery', 'emoji': '👀'}
 
-            # Build expander title - HIDE raw score, show ONLY tier badge (World-Class UX)
-            expander_title = f"**{suggested.get('name', 'Unknown')}**"
-            if tier_info:
-                expander_title += f" {tier_info['emoji']} {tier_info['label']}"
+            # Admin Debug Mode toggle
+            show_debug = st.session_state.get('show_debug_scores', False)
+
+            # Build expander title - conditionally show scores based on Admin toggle
+            if show_debug:
+                # Admin view: show raw score + tier badge
+                expander_title = f"**{suggested.get('name', 'Unknown')}** - {score:.2f}/100"
+                if tier_info:
+                    expander_title += f" {tier_info['emoji']} {tier_info['label']}"
+            else:
+                # User view: ONLY tier badge (World-Class UX)
+                expander_title = f"**{suggested.get('name', 'Unknown')}**"
+                if tier_info:
+                    expander_title += f" {tier_info['emoji']} {tier_info['label']}"
 
             # Create expandable card for each match
             with st.expander(expander_title, expanded=(status == 'viewed')):
@@ -1614,9 +1632,16 @@ def show_matches():
                         st.markdown(f"**Services:** {suggested['service_provided']}")
 
                 with col2:
-                    # Show ONLY tier badge (hide raw score from main view)
-                    if tier_info:
-                        st.markdown(f'<span class="tier-badge tier-{tier_info["tier"]}">{tier_info["emoji"]} {tier_info["label"]}</span>', unsafe_allow_html=True)
+                    # Admin: show score + badge, User: show only badge
+                    if show_debug:
+                        score_html = f'<span class="match-score">{score:.2f}/100</span>'
+                        if tier_info:
+                            score_html += f' <span class="tier-badge tier-{tier_info["tier"]}">{tier_info["emoji"]} {tier_info["label"]}</span>'
+                        st.markdown(score_html, unsafe_allow_html=True)
+                    else:
+                        if tier_info:
+                            st.markdown(f'<span class="tier-badge tier-{tier_info["tier"]}">{tier_info["emoji"]} {tier_info["label"]}</span>', unsafe_allow_html=True)
+
                     if suggested.get('social_reach'):
                         st.caption(f"Reach: {suggested['social_reach']:,}")
                     if suggested.get('list_size'):
@@ -1629,13 +1654,15 @@ def show_matches():
                     elif trust_level == 'legacy':
                         st.caption("📋 Profile Data")
 
-                # V1 Score Breakdown Section
+                # V1 Score Breakdown Section - ADMIN ONLY
                 harmonic_mean = match.get('harmonic_mean')
                 score_ab = match.get('score_ab')
                 score_ba = match.get('score_ba')
 
-                if harmonic_mean is not None:
-                    with st.expander("📊 V1 Score Breakdown"):
+                if show_debug and harmonic_mean is not None:
+                    with st.expander("🛠️ Admin Debug Data", expanded=False):
+                        st.caption("*Visible only to admins with debug mode enabled*")
+
                         col_a, col_b, col_c = st.columns(3)
 
                         with col_a:
@@ -1656,10 +1683,19 @@ def show_matches():
                             st.markdown(f"**Scale Symmetry:** {scale_symmetry:.1%}")
                             st.caption("Business size alignment (higher = better peer match)")
 
-                        # Match reason with V1 explanations
+                        # Trust level multiplier
+                        st.markdown(f"**Trust Level:** `{trust_level}` (weight multiplier)")
+
+                        # Raw match reason (for debugging extraction)
                         if match.get('match_reason'):
                             st.markdown("---")
-                            st.markdown(f"**Why:** {match['match_reason']}")
+                            st.markdown(f"**Raw Match Reason:** `{match['match_reason']}`")
+
+                        # Database IDs for debugging
+                        st.markdown("---")
+                        st.caption(f"Match ID: `{match.get('id', 'N/A')}`")
+                        st.caption(f"Profile ID: `{match.get('profile_id', 'N/A')}`")
+                        st.caption(f"Suggested ID: `{match.get('suggested_profile_id', 'N/A')}`")
 
                 # Rich Analysis Section
                 rich_analysis = match.get('rich_analysis')
@@ -1692,10 +1728,11 @@ def show_matches():
                     except (json.JSONDecodeError, TypeError):
                         analysis = {}
 
-                # Match reason (fallback if no rich analysis)
+                # Match reason (humanized narrative for users, fallback if no rich analysis)
                 if match.get('match_reason') and not rich_analysis:
                     st.markdown("---")
-                    st.markdown(f"**Why this match:** {match['match_reason']}")
+                    # Render with markdown to support bold formatting from _generate_reason
+                    st.markdown(f"**Why this match:** {match['match_reason']}", unsafe_allow_html=False)
 
                 # Time-based match context - show when topics were mentioned
                 match_context = match.get('match_context')
