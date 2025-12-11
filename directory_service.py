@@ -1139,12 +1139,27 @@ class DirectoryService:
         try:
             from collections import defaultdict
 
-            result = self.client.table("match_suggestions") \
-                .select("profile_id, harmonic_mean") \
-                .not_.is_("harmonic_mean", "null") \
-                .execute()
+            # Use admin client to bypass RLS on match_suggestions
+            admin_client = get_admin_client()
 
-            matches = result.data or []
+            # Paginate to get all matches (Supabase has default 1000 row limit)
+            page_size = 1000
+            matches = []
+            offset = 0
+            while True:
+                result = admin_client.table("match_suggestions") \
+                    .select("profile_id, harmonic_mean") \
+                    .not_.is_("harmonic_mean", "null") \
+                    .range(offset, offset + page_size - 1) \
+                    .execute()
+                if not result.data:
+                    break
+                matches.extend(result.data)
+                if len(result.data) < page_size:
+                    break
+                offset += page_size
+                if offset > 100000:
+                    break
 
             # Group by profile and assign ranks
             profile_matches = defaultdict(list)
@@ -1171,7 +1186,9 @@ class DirectoryService:
     def get_popularity_leaderboard(self, limit: int = 20) -> Dict[str, Any]:
         """Fetch most recommended users from match_popularity table"""
         try:
-            result = self.client.table("match_popularity") \
+            # Use admin client to bypass RLS
+            admin_client = get_admin_client()
+            result = admin_client.table("match_popularity") \
                 .select("*, profile:profile_id(name, company)") \
                 .order("top_3_appearances", desc=True) \
                 .limit(limit) \
@@ -1185,7 +1202,9 @@ class DirectoryService:
         try:
             from collections import Counter
 
-            result = self.client.table("intake_submissions") \
+            # Use admin client to bypass RLS
+            admin_client = get_admin_client()
+            result = admin_client.table("intake_submissions") \
                 .select("verified_offers, verified_needs") \
                 .not_.is_("confirmed_at", "null") \
                 .execute()
@@ -1214,7 +1233,9 @@ class DirectoryService:
         try:
             from collections import Counter
 
-            result = self.client.table("intake_submissions") \
+            # Use admin client to bypass RLS
+            admin_client = get_admin_client()
+            result = admin_client.table("intake_submissions") \
                 .select("anti_personas") \
                 .not_.is_("confirmed_at", "null") \
                 .execute()
@@ -1247,20 +1268,49 @@ class DirectoryService:
     def get_orphan_users(self, limit: int = 50) -> Dict[str, Any]:
         """Get users with 0 matches (Red Flag)"""
         try:
-            # Get all profile IDs that have matches
-            matched_result = self.client.table("match_suggestions") \
-                .select("profile_id") \
-                .execute()
-            matched_ids = set(r['profile_id'] for r in matched_result.data or [])
+            # Use admin client to bypass RLS on match_suggestions
+            admin_client = get_admin_client()
 
-            # Get all profiles
-            profiles_result = self.client.table("profiles") \
-                .select("id, name, company, email, created_at") \
-                .order("created_at", desc=True) \
-                .execute()
+            # Get all profile IDs that have matches using pagination
+            # (Supabase has a default 1000 row limit)
+            page_size = 1000
+            matched_ids = set()
+            offset = 0
+            while True:
+                result = admin_client.table("match_suggestions") \
+                    .select("profile_id") \
+                    .range(offset, offset + page_size - 1) \
+                    .execute()
+                if not result.data:
+                    break
+                for r in result.data:
+                    matched_ids.add(r['profile_id'])
+                if len(result.data) < page_size:
+                    break
+                offset += page_size
+                if offset > 100000:  # Safety limit
+                    break
+
+            # Get all profiles (also with pagination for large directories)
+            all_profiles = []
+            offset = 0
+            while True:
+                profiles_result = admin_client.table("profiles") \
+                    .select("id, name, company, email, created_at") \
+                    .order("created_at", desc=True) \
+                    .range(offset, offset + page_size - 1) \
+                    .execute()
+                if not profiles_result.data:
+                    break
+                all_profiles.extend(profiles_result.data)
+                if len(profiles_result.data) < page_size:
+                    break
+                offset += page_size
+                if offset > 100000:  # Safety limit
+                    break
 
             orphans = [
-                p for p in profiles_result.data or []
+                p for p in all_profiles
                 if p['id'] not in matched_ids
             ]
 
@@ -1273,13 +1323,30 @@ class DirectoryService:
         try:
             from collections import defaultdict
 
-            result = self.client.table("match_suggestions") \
-                .select("profile_id, status") \
-                .execute()
+            # Use admin client to bypass RLS on match_suggestions
+            admin_client = get_admin_client()
+
+            # Paginate to get all matches (Supabase has default 1000 row limit)
+            page_size = 1000
+            all_matches = []
+            offset = 0
+            while True:
+                result = admin_client.table("match_suggestions") \
+                    .select("profile_id, status") \
+                    .range(offset, offset + page_size - 1) \
+                    .execute()
+                if not result.data:
+                    break
+                all_matches.extend(result.data)
+                if len(result.data) < page_size:
+                    break
+                offset += page_size
+                if offset > 100000:
+                    break
 
             profile_stats = defaultdict(lambda: {"contacted": 0, "connected": 0})
 
-            for row in result.data or []:
+            for row in all_matches:
                 pid = row['profile_id']
                 if row['status'] == 'contacted':
                     profile_stats[pid]["contacted"] += 1
@@ -1293,7 +1360,7 @@ class DirectoryService:
             ]
 
             if ghost_ids:
-                profiles_result = self.client.table("profiles") \
+                profiles_result = admin_client.table("profiles") \
                     .select("id, name, company, email") \
                     .in_("id", ghost_ids) \
                     .execute()
@@ -1315,11 +1382,28 @@ class DirectoryService:
         try:
             from collections import Counter
 
-            result = self.client.table("match_suggestions") \
-                .select("trust_level") \
-                .execute()
+            # Use admin client to bypass RLS on match_suggestions
+            admin_client = get_admin_client()
 
-            counts = Counter(r.get('trust_level', 'legacy') for r in result.data or [])
+            # Paginate to get all matches (Supabase has default 1000 row limit)
+            page_size = 1000
+            all_trust_levels = []
+            offset = 0
+            while True:
+                result = admin_client.table("match_suggestions") \
+                    .select("trust_level") \
+                    .range(offset, offset + page_size - 1) \
+                    .execute()
+                if not result.data:
+                    break
+                all_trust_levels.extend(r.get('trust_level', 'legacy') for r in result.data)
+                if len(result.data) < page_size:
+                    break
+                offset += page_size
+                if offset > 100000:
+                    break
+
+            counts = Counter(all_trust_levels)
             total = sum(counts.values())
 
             return {

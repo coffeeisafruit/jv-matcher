@@ -57,3 +57,48 @@ FinalScore = HarmonicMean(Score_AB, Score_BA)
 - `scripts/seed_and_fuse.py` - CSV + JSON → Database fusion
 - `database/migrations/004_v1_matching.sql` - Intake submissions table
 - `app.py` - Micro-Intake UI and Match display
+
+# Supabase Critical Gotchas
+
+## 1. Row Level Security (RLS)
+Supabase tables have RLS enabled. The regular client (`get_client()`) respects RLS policies and may return 0 rows for protected tables like `match_suggestions`, `intake_submissions`, etc.
+
+**Solution:** For admin/backend operations that need full table access, use the admin client:
+```python
+from supabase_client import get_admin_client
+admin_client = get_admin_client()
+result = admin_client.table("match_suggestions").select("*").execute()
+```
+
+The `DirectoryService` class accepts `use_admin=True` parameter, but individual methods may need to call `get_admin_client()` directly for specific queries.
+
+## 2. Pagination Limit (1000 rows default)
+Supabase queries return a **maximum of 1000 rows by default**. If a table has more data, you'll silently get incomplete results.
+
+**Solution:** Use pagination for any table that could exceed 1000 rows:
+```python
+page_size = 1000
+all_data = []
+offset = 0
+while True:
+    result = client.table("match_suggestions") \
+        .select("profile_id") \
+        .range(offset, offset + page_size - 1) \
+        .execute()
+    if not result.data:
+        break
+    all_data.extend(result.data)
+    if len(result.data) < page_size:
+        break
+    offset += page_size
+```
+
+**Tables likely to exceed 1000 rows:**
+- `match_suggestions` (40k+ rows)
+- `profiles` (3.7k+ rows)
+- Any aggregation/analytics queries
+
+## 3. Common Symptom
+If admin dashboards show unexpected zeros or missing data, check:
+1. Is the query using admin client? (RLS issue)
+2. Is pagination implemented? (1000 row limit issue)
