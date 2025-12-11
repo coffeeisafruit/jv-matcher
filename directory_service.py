@@ -1126,3 +1126,225 @@ class DirectoryService:
             return {"success": True}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    # ==========================================
+    # MISSION CONTROL DASHBOARD METHODS
+    # ==========================================
+
+    def get_tier_distribution(self) -> Dict[str, Any]:
+        """
+        Compute rank-based tier distribution for Algorithm Calibration.
+        Gold: Rank 1-3, Silver: Rank 4-8, Bronze: 9+
+        """
+        try:
+            from collections import defaultdict
+
+            result = self.client.table("match_suggestions") \
+                .select("profile_id, harmonic_mean") \
+                .not_.is_("harmonic_mean", "null") \
+                .execute()
+
+            matches = result.data or []
+
+            # Group by profile and assign ranks
+            profile_matches = defaultdict(list)
+            for m in matches:
+                profile_matches[m['profile_id']].append(m['harmonic_mean'])
+
+            tiers = {"Gold (Top 3)": 0, "Silver (4-8)": 0, "Bronze (9+)": 0}
+            for profile_id, scores in profile_matches.items():
+                sorted_scores = sorted(scores, reverse=True)
+                for rank, score in enumerate(sorted_scores, 1):
+                    if rank <= 3:
+                        tiers["Gold (Top 3)"] += 1
+                    elif rank <= 8:
+                        tiers["Silver (4-8)"] += 1
+                    else:
+                        tiers["Bronze (9+)"] += 1
+
+            return {"success": True, "data": [
+                {"tier": k, "match_count": v} for k, v in tiers.items()
+            ]}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_popularity_leaderboard(self, limit: int = 20) -> Dict[str, Any]:
+        """Fetch most recommended users from match_popularity table"""
+        try:
+            result = self.client.table("match_popularity") \
+                .select("*, profile:profile_id(name, company)") \
+                .order("top_3_appearances", desc=True) \
+                .limit(limit) \
+                .execute()
+            return {"success": True, "data": result.data or []}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_offer_need_keywords(self) -> Dict[str, Any]:
+        """Extract keywords from verified_offers and verified_needs for marketplace balance"""
+        try:
+            from collections import Counter
+
+            result = self.client.table("intake_submissions") \
+                .select("verified_offers, verified_needs") \
+                .not_.is_("confirmed_at", "null") \
+                .execute()
+
+            offers = []
+            needs = []
+            for row in result.data or []:
+                offers.extend(row.get('verified_offers') or [])
+                needs.extend(row.get('verified_needs') or [])
+
+            offer_counts = Counter(offers)
+            need_counts = Counter(needs)
+
+            return {
+                "success": True,
+                "data": {
+                    "offers": dict(offer_counts.most_common(20)),
+                    "needs": dict(need_counts.most_common(20))
+                }
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_anti_persona_usage(self) -> Dict[str, Any]:
+        """Get anti-persona blocking stats for marketplace balance"""
+        try:
+            from collections import Counter
+
+            result = self.client.table("intake_submissions") \
+                .select("anti_personas") \
+                .not_.is_("confirmed_at", "null") \
+                .execute()
+
+            all_antipersonas = []
+            total_with_any = 0
+            for row in result.data or []:
+                ap = row.get('anti_personas') or []
+                if ap:
+                    total_with_any += 1
+                    all_antipersonas.extend(ap)
+
+            counts = Counter(all_antipersonas)
+            total_intakes = len(result.data or [])
+
+            return {
+                "success": True,
+                "data": {
+                    "counts": dict(counts),
+                    "total_intakes": total_intakes,
+                    "percentages": {
+                        k: round(100 * v / total_intakes, 1) if total_intakes > 0 else 0
+                        for k, v in counts.items()
+                    }
+                }
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_orphan_users(self, limit: int = 50) -> Dict[str, Any]:
+        """Get users with 0 matches (Red Flag)"""
+        try:
+            # Get all profile IDs that have matches
+            matched_result = self.client.table("match_suggestions") \
+                .select("profile_id") \
+                .execute()
+            matched_ids = set(r['profile_id'] for r in matched_result.data or [])
+
+            # Get all profiles
+            profiles_result = self.client.table("profiles") \
+                .select("id, name, company, email, created_at") \
+                .order("created_at", desc=True) \
+                .execute()
+
+            orphans = [
+                p for p in profiles_result.data or []
+                if p['id'] not in matched_ids
+            ]
+
+            return {"success": True, "data": orphans[:limit], "count": len(orphans)}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_ghost_users(self, min_intros: int = 5) -> Dict[str, Any]:
+        """Get users with many intros but no replies (Red Flag)"""
+        try:
+            from collections import defaultdict
+
+            result = self.client.table("match_suggestions") \
+                .select("profile_id, status") \
+                .execute()
+
+            profile_stats = defaultdict(lambda: {"contacted": 0, "connected": 0})
+
+            for row in result.data or []:
+                pid = row['profile_id']
+                if row['status'] == 'contacted':
+                    profile_stats[pid]["contacted"] += 1
+                elif row['status'] == 'connected':
+                    profile_stats[pid]["connected"] += 1
+
+            # Filter ghosts: many intros, zero connections
+            ghost_ids = [
+                pid for pid, stats in profile_stats.items()
+                if stats["contacted"] >= min_intros and stats["connected"] == 0
+            ]
+
+            if ghost_ids:
+                profiles_result = self.client.table("profiles") \
+                    .select("id, name, company, email") \
+                    .in_("id", ghost_ids) \
+                    .execute()
+
+                ghosts = []
+                for p in profiles_result.data or []:
+                    p["intros_sent"] = profile_stats[p['id']]["contacted"]
+                    ghosts.append(p)
+
+                ghosts.sort(key=lambda x: x["intros_sent"], reverse=True)
+                return {"success": True, "data": ghosts}
+
+            return {"success": True, "data": []}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_trust_distribution(self) -> Dict[str, Any]:
+        """Get distribution of matches by trust level"""
+        try:
+            from collections import Counter
+
+            result = self.client.table("match_suggestions") \
+                .select("trust_level") \
+                .execute()
+
+            counts = Counter(r.get('trust_level', 'legacy') for r in result.data or [])
+            total = sum(counts.values())
+
+            return {
+                "success": True,
+                "data": [
+                    {
+                        "trust_level": level,
+                        "count": count,
+                        "percentage": round(100 * count / total, 1) if total > 0 else 0
+                    }
+                    for level, count in counts.items()
+                ]
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def record_draft_intro_click(self, match_id: str) -> Dict[str, Any]:
+        """Record when Draft Intro button is clicked for Action Rate tracking"""
+        try:
+            from datetime import datetime
+
+            self.client.table("match_suggestions") \
+                .update({"draft_intro_clicked_at": datetime.utcnow().isoformat()}) \
+                .eq("id", match_id) \
+                .execute()
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}

@@ -1833,6 +1833,10 @@ def show_matches():
                         )
                         # Store generated intro to populate text area
                         st.session_state[f'draft_intro_{match["id"]}'] = intro_text
+
+                        # Track Draft Intro click for Mission Control Action Rate
+                        directory_service.record_draft_intro_click(match['id'])
+
                         st.rerun()  # Rerun to update text area with new value
 
                 # Use draft intro if generated, otherwise use saved outreach or default
@@ -2399,7 +2403,10 @@ def show_admin():
         st.error("Admin access required")
         return
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Add Profile", "Import CSV", "Export", "Generate Matches", "V1 Matches", "Analytics", "Pending Reviews"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+        "Add Profile", "Import CSV", "Export", "Generate Matches",
+        "V1 Matches", "Analytics", "Pending Reviews", "Mission Control"
+    ])
 
     with tab1:
         show_add_profile_form()
@@ -2421,6 +2428,9 @@ def show_admin():
 
     with tab7:
         show_pending_reviews()
+
+    with tab8:
+        show_mission_control()
 
 def show_add_profile_form():
     """Form to add a new profile"""
@@ -2830,6 +2840,271 @@ def show_analytics():
 
     except Exception as e:
         st.error(f"Error loading analytics: {str(e)}")
+
+
+def show_mission_control():
+    """
+    Mission Control Dashboard - Admin bird's-eye view of marketplace health.
+    Four zones: North Star KPIs, Algorithm Calibration, Marketplace Balance, Red Flags
+    """
+    st.markdown("### Mission Control Dashboard")
+    st.caption("*Real-time marketplace health metrics*")
+
+    directory_service = DirectoryService(use_admin=True)
+
+    # ==========================================
+    # ZONE 1: NORTH STAR KPIs
+    # ==========================================
+    st.markdown("---")
+    st.markdown("#### Zone 1: North Star KPIs")
+
+    try:
+        # Platinum Ratio: % users with verified intake
+        profiles_result = directory_service.client.table("profiles").select("id", count="exact").execute()
+        total_profiles = profiles_result.count or 0
+
+        verified_result = directory_service.client.table("intake_submissions") \
+            .select("profile_id", count="exact") \
+            .not_.is_("confirmed_at", "null") \
+            .execute()
+        verified_count = verified_result.count or 0
+
+        platinum_ratio = round(100 * verified_count / total_profiles, 1) if total_profiles > 0 else 0
+
+        # Match Liquidity: Avg matches per user
+        matches_result = directory_service.client.table("match_suggestions") \
+            .select("profile_id", count="exact") \
+            .neq("status", "dismissed") \
+            .execute()
+        total_matches = matches_result.count or 0
+
+        profiles_with_matches_result = directory_service.client.table("match_suggestions") \
+            .select("profile_id") \
+            .neq("status", "dismissed") \
+            .execute()
+        unique_profiles_with_matches = len(set(r['profile_id'] for r in profiles_with_matches_result.data or []))
+
+        match_liquidity = round(total_matches / unique_profiles_with_matches, 2) if unique_profiles_with_matches > 0 else 0
+
+        # Action Rate: % matches where Draft Intro clicked (or contacted)
+        actioned_result = directory_service.client.table("match_suggestions") \
+            .select("id", count="exact") \
+            .or_("status.eq.contacted,status.eq.connected") \
+            .execute()
+        actioned_count = actioned_result.count or 0
+        action_rate = round(100 * actioned_count / total_matches, 1) if total_matches > 0 else 0
+
+        # Feedback Score: Avg star rating
+        feedback_result = directory_service.client.table("match_outcomes") \
+            .select("star_rating") \
+            .not_.is_("star_rating", "null") \
+            .execute()
+        ratings = [r['star_rating'] for r in feedback_result.data or [] if r.get('star_rating')]
+        feedback_score = round(sum(ratings) / len(ratings), 2) if ratings else 0
+        feedback_count = len(ratings)
+
+        # Display KPIs
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            delta_color = "normal" if platinum_ratio >= 50 else "inverse"
+            st.metric(
+                "Platinum Ratio",
+                f"{platinum_ratio}%",
+                delta=f"Target: 50%" if platinum_ratio < 50 else "On Target",
+                delta_color=delta_color
+            )
+            st.caption(f"{verified_count} / {total_profiles} verified")
+
+        with col2:
+            liquidity_status = "normal" if 3 <= match_liquidity <= 5 else "inverse"
+            st.metric(
+                "Match Liquidity",
+                f"{match_liquidity}",
+                delta="Target: 3-5" if match_liquidity < 3 or match_liquidity > 5 else "Optimal",
+                delta_color=liquidity_status
+            )
+            st.caption("Avg matches/user")
+
+        with col3:
+            st.metric(
+                "Action Rate",
+                f"{action_rate}%",
+                delta=f"{actioned_count} actions"
+            )
+            st.caption("Contacted or connected")
+
+        with col4:
+            star_display = f"{feedback_score}/5" if feedback_score > 0 else "No data"
+            st.metric(
+                "Feedback Score",
+                star_display,
+                delta=f"{feedback_count} ratings"
+            )
+            st.caption("Avg star rating")
+
+    except Exception as e:
+        st.error(f"Error loading KPIs: {str(e)}")
+
+    # ==========================================
+    # ZONE 2: ALGORITHM CALIBRATION
+    # ==========================================
+    st.markdown("---")
+    st.markdown("#### Zone 2: Algorithm Calibration")
+
+    col_tier, col_popularity = st.columns(2)
+
+    with col_tier:
+        st.markdown("**Tier Distribution** (Rank-Based)")
+        try:
+            tier_result = directory_service.get_tier_distribution()
+            if tier_result.get('success') and tier_result.get('data'):
+                tier_data = tier_result['data']
+                total_tier = sum(t['match_count'] for t in tier_data)
+
+                for tier in tier_data:
+                    pct = round(100 * tier['match_count'] / total_tier, 1) if total_tier > 0 else 0
+                    emoji = "🔥" if "Gold" in tier['tier'] else ("✅" if "Silver" in tier['tier'] else "👀")
+                    st.markdown(f"{emoji} **{tier['tier']}**: {tier['match_count']} ({pct}%)")
+
+                # Show ideal vs actual
+                st.caption("Ideal: 10% Gold, 60% Silver, 30% Bronze")
+            else:
+                st.info("No tier data. Run V1 Match Generation first.")
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+
+    with col_popularity:
+        st.markdown("**Popularity Bias Check** (Top 10)")
+        try:
+            pop_result = directory_service.get_popularity_leaderboard(limit=10)
+            if pop_result.get('success') and pop_result.get('data'):
+                for i, user in enumerate(pop_result['data'][:10], 1):
+                    profile = user.get('profile', {})
+                    name = profile.get('name', 'Unknown')
+                    appearances = user.get('top_3_appearances', 0)
+
+                    # Warning if too many appearances
+                    warning = " ⚠️" if appearances > 10 else ""
+                    st.markdown(f"{i}. **{name}**: {appearances} Top 3 recs{warning}")
+
+                if any(u.get('top_3_appearances', 0) > 10 for u in pop_result['data']):
+                    st.warning("⚠️ Popularity Cap may be too loose")
+            else:
+                st.info("No popularity data. Run V1 Match Generation first.")
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+
+    # ==========================================
+    # ZONE 3: MARKETPLACE BALANCE
+    # ==========================================
+    st.markdown("---")
+    st.markdown("#### Zone 3: Marketplace Balance")
+
+    col_offers, col_needs, col_antipersona = st.columns(3)
+
+    with col_offers:
+        st.markdown("**Top Offers**")
+        try:
+            keywords_result = directory_service.get_offer_need_keywords()
+            if keywords_result.get('success'):
+                offers = keywords_result['data'].get('offers', {})
+                if offers:
+                    for offer, count in list(offers.items())[:8]:
+                        st.markdown(f"• {offer}: **{count}**")
+                else:
+                    st.caption("No verified offers yet")
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+
+    with col_needs:
+        st.markdown("**Top Needs**")
+        try:
+            keywords_result = directory_service.get_offer_need_keywords()
+            if keywords_result.get('success'):
+                needs = keywords_result['data'].get('needs', {})
+                if needs:
+                    for need, count in list(needs.items())[:8]:
+                        st.markdown(f"• {need}: **{count}**")
+                else:
+                    st.caption("No verified needs yet")
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+
+    with col_antipersona:
+        st.markdown("**Anti-Persona Usage**")
+        try:
+            ap_result = directory_service.get_anti_persona_usage()
+            if ap_result.get('success'):
+                data = ap_result['data']
+                percentages = data.get('percentages', {})
+
+                ap_labels = {
+                    'no_beginners': 'No Beginners',
+                    'no_service_providers': 'No Service Providers',
+                    'no_competitors': 'No Competitors'
+                }
+
+                if percentages:
+                    for ap_id, pct in percentages.items():
+                        label = ap_labels.get(ap_id, ap_id)
+                        st.markdown(f"• {label}: **{pct}%**")
+                    st.caption(f"Based on {data.get('total_intakes', 0)} intakes")
+                else:
+                    st.caption("No anti-persona data yet")
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+
+    # ==========================================
+    # ZONE 4: RED FLAGS
+    # ==========================================
+    st.markdown("---")
+    st.markdown("#### Zone 4: Red Flags")
+
+    col_orphans, col_ghosts = st.columns(2)
+
+    with col_orphans:
+        st.markdown("**Orphan Users** (0 matches)")
+        try:
+            orphan_result = directory_service.get_orphan_users(limit=10)
+            if orphan_result.get('success'):
+                orphans = orphan_result['data']
+                total_orphans = orphan_result.get('count', len(orphans))
+
+                if orphans:
+                    st.warning(f"⚠️ {total_orphans} users have zero matches")
+                    for user in orphans[:5]:
+                        st.markdown(f"• {user.get('name', 'Unknown')} ({user.get('company', 'N/A')})")
+                    if total_orphans > 5:
+                        st.caption(f"... and {total_orphans - 5} more")
+                else:
+                    st.success("✅ No orphan users!")
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+
+    with col_ghosts:
+        st.markdown("**Ghost Users** (5+ intros, 0 replies)")
+        try:
+            ghost_result = directory_service.get_ghost_users(min_intros=5)
+            if ghost_result.get('success'):
+                ghosts = ghost_result['data']
+
+                if ghosts:
+                    st.warning(f"⚠️ {len(ghosts)} users may be getting ghosted")
+                    for user in ghosts[:5]:
+                        st.markdown(f"• {user.get('name', 'Unknown')}: {user.get('intros_sent', 0)} intros")
+                else:
+                    st.success("✅ No ghost users detected!")
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+
+    # ==========================================
+    # REFRESH BUTTON
+    # ==========================================
+    st.markdown("---")
+    if st.button("🔄 Refresh Dashboard", type="primary"):
+        st.rerun()
+
 
 def show_pending_reviews():
     """Show pending profile reviews"""
