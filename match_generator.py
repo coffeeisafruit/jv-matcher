@@ -2377,22 +2377,31 @@ Return ONLY "YES" if there's at least one semantic match, or "NO" if none."""
             'match_cycle_id': match_cycle_id
         }
 
-    def generate_matches_for_user(self, profile_id: str, top_n: int = 10) -> Dict:
+    def generate_matches_for_user(self, profile_id: str, top_n: int = 10, min_score: float = 5.0) -> Dict:
         """Generate V1 matches for a specific user"""
+        print(f"[V1] Starting match generation for profile: {profile_id}")
+
         # Get target profile
         result = self.directory_service.get_profile_by_id(profile_id)
         if not result.get('success') or not result.get('data'):
+            print(f"[V1] ERROR: Profile not found")
             return {'success': False, 'error': 'Profile not found'}
 
         target_profile = result['data']
         target_verified = self._get_verified_data(profile_id)
+        print(f"[V1] Target: {target_profile.get('name')} | Trust: {target_verified['trust_level']} | Offers: {target_verified['offers'][:2] if target_verified['offers'] else 'None'} | Needs: {target_verified['needs'][:2] if target_verified['needs'] else 'None'}")
 
         # Get all profiles
         all_result = self.directory_service.get_all_profiles_for_matching()
         if not all_result:
+            print(f"[V1] ERROR: Failed to fetch profiles")
             return {'success': False, 'error': 'Failed to fetch profiles'}
 
+        print(f"[V1] Evaluating {len(all_result)} candidate profiles...")
+
         matches = []
+        scores_above_zero = 0
+
         for candidate in all_result:
             if candidate['id'] == profile_id:
                 continue
@@ -2410,7 +2419,11 @@ Return ONLY "YES" if there's at least one semantic match, or "NO" if none."""
             trust_weight = min(target_verified['weight_multiplier'], candidate_verified['weight_multiplier'])
             weighted_score = harmonic * trust_weight
 
-            if weighted_score >= 15.0:
+            if harmonic > 0:
+                scores_above_zero += 1
+
+            # Lower threshold to allow more matches through (default 5.0 instead of 15.0)
+            if weighted_score >= min_score:
                 matches.append({
                     'profile_id': profile_id,
                     'suggested_profile_id': candidate['id'],
@@ -2425,9 +2438,14 @@ Return ONLY "YES" if there's at least one semantic match, or "NO" if none."""
                     )
                 })
 
+        print(f"[V1] Scores > 0: {scores_above_zero} | Matches above threshold ({min_score}): {len(matches)}")
+
         # Sort and keep top N
         matches.sort(key=lambda x: x['harmonic_mean'], reverse=True)
         matches = matches[:top_n]
+
+        if matches:
+            print(f"[V1] Top match: {matches[0].get('profile', {}).get('name')} | Score: {matches[0].get('harmonic_mean')}")
 
         # Save to database
         saved = 0
@@ -2440,7 +2458,9 @@ Return ONLY "YES" if there's at least one semantic match, or "NO" if none."""
                 ).execute()
                 saved += 1
             except Exception as e:
-                print(f"Error saving match: {e}")
+                print(f"[V1] Error saving match: {e}")
+
+        print(f"[V1] COMPLETE: Saved {saved} matches to database")
 
         return {
             'success': True,
