@@ -1822,6 +1822,28 @@ def show_post_event_intake(event_name: str = None, event_id: str = None):
         event_name: Optional event name for display
         event_id: Optional event identifier for tracking
     """
+    # Show success message if just submitted
+    if st.session_state.get('intake_submitted') and st.session_state.get('intake_success_msg'):
+        msg = st.session_state['intake_success_msg']
+        st.success("✅ **Preferences saved successfully!**")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if msg.get('offers'):
+                st.markdown(f"**Your Offers:** {', '.join(msg['offers'])}")
+            if msg.get('needs'):
+                st.markdown(f"**Your Needs:** {', '.join(msg['needs'])}")
+        with col2:
+            if msg.get('preferences'):
+                prefs_display = [p.replace('_', ' ') for p in msg['preferences']]
+                st.markdown(f"**Match Types:** {', '.join(prefs_display)}")
+
+        st.info("🔄 Go to **My Matches** and click **'Refresh My Matches (V1)'** to see updated recommendations!")
+        st.markdown("---")
+
+        # Clear the message after showing once
+        del st.session_state['intake_success_msg']
+
     # Header
     if event_name:
         st.markdown(f'<div class="main-header">🎯 Post-Event Check-in: {event_name}</div>', unsafe_allow_html=True)
@@ -1960,21 +1982,13 @@ def show_post_event_intake(event_name: str = None, event_id: str = None):
                     # Update profile's last_active_at for momentum scoring
                     directory_service.update_profile_last_active(user_profile['id'])
 
-                    st.success("✅ Your offers and needs have been confirmed!")
-
-                    # Show what was saved
-                    st.markdown("---")
-                    st.markdown("### Saved Successfully")
-                    if verified_offers:
-                        st.markdown(f"**Offers:** {', '.join(verified_offers)}")
-                    if verified_needs:
-                        st.markdown(f"**Needs:** {', '.join(verified_needs)}")
-                    st.markdown(f"**Match Type:** {match_preference.replace('_', ' ')}")
-
-                    st.info("🔄 Your matches are being updated with your verified preferences. Check 'My Matches' to see updated recommendations!")
-
-                    # Set flag and rerun
+                    # Store success in session state so it persists after rerun
                     st.session_state['intake_submitted'] = True
+                    st.session_state['intake_success_msg'] = {
+                        'offers': verified_offers,
+                        'needs': verified_needs,
+                        'preferences': match_preferences
+                    }
                     st.rerun()
                 else:
                     st.error(f"Failed to save intake: {result.get('error', 'Unknown error')}")
