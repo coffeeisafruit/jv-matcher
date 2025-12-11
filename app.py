@@ -1575,7 +1575,7 @@ def show_matches():
     if matches:
         st.markdown(f"**{len(matches)} matches**")
 
-        for match in matches:
+        for rank, match in enumerate(matches, start=1):
             suggested = match.get('suggested', {})
             if not suggested:
                 continue
@@ -1583,14 +1583,16 @@ def show_matches():
             score = match.get('match_score', 0)
             status = match.get('status', 'pending')
 
-            # V1.5: Calculate confidence tier based on harmonic mean
-            harmonic_mean = match.get('harmonic_mean', 0) or score
+            # V1.5: Relative tier based on RANK (not raw score)
+            # Gold (Top Pick): Rank 1-3
+            # Silver (Strong Match): Rank 4-8
+            # Bronze (Discovery): Rank 9+
             tier_info = None
-            if harmonic_mean >= 60:
+            if rank <= 3:
                 tier_info = {'tier': 'gold', 'label': 'Top Pick', 'emoji': '🔥'}
-            elif harmonic_mean >= 40:
+            elif rank <= 8:
                 tier_info = {'tier': 'silver', 'label': 'Strong Match', 'emoji': '✅'}
-            elif harmonic_mean >= 20:
+            else:
                 tier_info = {'tier': 'bronze', 'label': 'Discovery', 'emoji': '👀'}
 
             # Build expander title with tier badge

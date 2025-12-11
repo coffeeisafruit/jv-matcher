@@ -8,9 +8,10 @@
     ]
   },
   "confidence_tiers": {
-    "gold": {"min_score": 60, "label": "Top Pick", "emoji": "🔥", "color": "#FFD700"},
-    "silver": {"min_score": 40, "label": "Strong Match", "emoji": "✅", "color": "#C0C0C0"},
-    "bronze": {"min_score": 20, "label": "Discovery", "emoji": "👀", "color": "#CD7F32"}
+    "_note": "Relative tiers based on RANK, not raw score (Netflix/YouTube approach)",
+    "gold": {"max_rank": 3, "label": "Top Pick", "emoji": "🔥", "color": "#FFD700"},
+    "silver": {"max_rank": 8, "label": "Strong Match", "emoji": "✅", "color": "#C0C0C0"},
+    "bronze": {"max_rank": 999, "label": "Discovery", "emoji": "👀", "color": "#CD7F32"}
   },
   "intro_templates": {
     "Peer_Bundle": {
