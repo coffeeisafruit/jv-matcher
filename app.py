@@ -1765,7 +1765,7 @@ def show_matches():
                 # V1.5: Draft Intro Button (No-Ghost Action)
                 col_draft, col_spacer = st.columns([1, 3])
                 with col_draft:
-                    if st.button("✍️ Draft Intro", key=f"draft_intro_{match['id']}", type="secondary"):
+                    if st.button("✍️ Draft Intro", key=f"btn_draft_intro_{match['id']}", type="secondary"):
                         # V1.5: Use winning_preference from match (why THIS person matched)
                         # Falls back to user's intake preference if not available
                         match_pref = match.get('winning_preference')
