@@ -130,16 +130,37 @@ class FuzzyMatcher:
 
     @staticmethod
     def normalize_name(name: str) -> str:
-        """Normalize name for matching"""
+        """Normalize name for matching - handles Zoom transcript formatting"""
         if not name:
             return ""
 
         # Lowercase
         name = name.lower()
 
+        # Remove square brackets and contents if they contain company info
+        # Pattern: [Name - Company] 10 or [Name] 10
+        name = re.sub(r'^\s*\[([^\]]+)\]\s*\d*\s*$', r'\1', name)
+
+        # Remove trailing numbers (Zoom adds these)
+        name = re.sub(r'\s+\d+\s*$', '', name)
+
+        # Remove leading brackets if any remain
+        name = re.sub(r'^\s*\[', '', name)
+        name = re.sub(r'\]\s*$', '', name)
+
         # Remove common suffixes
         name = re.sub(r'\s*\([^)]+\)\s*', '', name)  # Remove (Host), etc
         name = re.sub(r'\s*-\s*zoom.*$', '', name, flags=re.IGNORECASE)
+
+        # Remove company/title suffixes like "- CompanyName" or "/ Title"
+        # But preserve the name before the separator
+        name = re.sub(r'\s*[-/]\s*[A-Za-z#][A-Za-z0-9#\s\.]*$', '', name)
+
+        # Remove URL-like suffixes (website domains) anywhere in string
+        name = re.sub(r',?\s*[a-z]+\.(com|org|net|io|co)\b[^,]*', '', name, flags=re.IGNORECASE)
+
+        # Remove trailing comma and anything after (title/role)
+        name = re.sub(r',\s*.*$', '', name)
 
         # Normalize whitespace
         name = ' '.join(name.strip().split())
@@ -325,10 +346,23 @@ class SeedAndFuseService:
         speakers = transcript_data.get('speakers', [])
         print(f"Found {len(speakers)} speakers to process")
 
-        # Get all existing profiles
+        # Get all existing profiles (pagination to handle >1000 rows)
         print(f"\nFetching existing profiles from database...")
-        profiles_result = self.supabase.table("profiles").select("*").execute()
-        all_profiles = profiles_result.data or []
+        all_profiles = []
+        page_size = 1000
+        offset = 0
+
+        while True:
+            profiles_result = self.supabase.table("profiles") \
+                .select("*") \
+                .range(offset, offset + page_size - 1) \
+                .execute()
+            batch = profiles_result.data or []
+            all_profiles.extend(batch)
+            if len(batch) < page_size:
+                break
+            offset += page_size
+
         print(f"Found {len(all_profiles)} profiles in database")
 
         # Process each speaker
