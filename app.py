@@ -1794,19 +1794,18 @@ def show_matches():
                             audience=(suggested.get('who_you_serve', 'your audience') or 'your audience')[:100],
                             my_name=user_profile.get('name', 'Your Name')
                         )
+                        # Store generated intro to populate text area
                         st.session_state[f'draft_intro_{match["id"]}'] = intro_text
+                        st.rerun()  # Rerun to update text area with new value
 
-                # Display generated intro in copyable code block
-                if st.session_state.get(f'draft_intro_{match["id"]}'):
-                    st.markdown("**Your Draft Intro:**")
-                    st.code(st.session_state[f'draft_intro_{match["id"]}'], language=None)
-                    st.caption("📋 Copy the message above and personalize it")
+                # Use draft intro if generated, otherwise use saved outreach or default
+                current_message = st.session_state.get(f'draft_intro_{match["id"]}', initial_outreach)
 
                 outreach_message = st.text_area(
-                    "Or customize your message",
-                    value=initial_outreach,
+                    "Your message",
+                    value=current_message,
                     key=f"outreach_{match['id']}",
-                    help="Edit and personalize this message"
+                    help="Click 'Draft Intro' to generate a template, then personalize it"
                 )
 
                 # Save outreach message if changed
@@ -1817,7 +1816,7 @@ def show_matches():
 
                 # Contact button
                 subject = f"Partnership Opportunity - {user_profile.get('name', 'JV Directory')}"
-                body = st.session_state.get(f'draft_intro_{match["id"]}', outreach_message) if st.session_state.get(f'draft_intro_{match["id"]}') else (outreach_message if outreach_message else f"Hi {suggested.get('name', 'there')},\n\nI came across your profile and think we might have a great partnership opportunity...")
+                body = outreach_message if outreach_message else f"Hi {suggested.get('name', 'there')},\n\nI came across your profile and think we might have a great partnership opportunity..."
 
                 if suggested.get('email'):
                     mailto_link = f"mailto:{suggested['email']}?subject={urllib.parse.quote(subject)}&body={urllib.parse.quote(body)}"
