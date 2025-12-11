@@ -2403,9 +2403,9 @@ def show_admin():
         st.error("Admin access required")
         return
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
         "Add Profile", "Import CSV", "Export", "Generate Matches",
-        "V1 Matches", "Analytics", "Pending Reviews", "Mission Control"
+        "V1 Matches", "Analytics", "Pending Reviews", "Mission Control", "Activation"
     ])
 
     with tab1:
@@ -2431,6 +2431,9 @@ def show_admin():
 
     with tab8:
         show_mission_control()
+
+    with tab9:
+        show_activation_staleness()
 
 def show_add_profile_form():
     """Form to add a new profile"""
@@ -3182,6 +3185,262 @@ def show_pending_reviews():
 
     except Exception as e:
         st.error(f"Error loading pending reviews: {str(e)}")
+
+# ==========================================
+# ACTIVATION & STALENESS MODULE
+# ==========================================
+
+def show_activation_staleness():
+    """
+    Data Freshness & Activation Module.
+    Identifies high-value users with stale data and generates nudge emails.
+    """
+    st.markdown("### Activation & Staleness")
+    st.markdown("*Identify high-value users with stale data and prompt them to verify*")
+
+    directory_service = DirectoryService(use_admin=True)
+
+    # ==========================================
+    # TOP METRICS ROW
+    # ==========================================
+    st.markdown("---")
+    st.markdown("#### Trust Status Overview")
+
+    try:
+        summary_result = directory_service.get_freshness_summary()
+
+        if summary_result.get('success'):
+            summary = summary_result['data']
+
+            col1, col2, col3, col4 = st.columns(4)
+
+            with col1:
+                st.metric(
+                    "Platinum Users",
+                    f"{summary['platinum_count']:,}",
+                    f"{summary['platinum_pct']}% of total",
+                    delta_color="normal"
+                )
+                st.caption("Verified in last 30 days")
+
+            with col2:
+                st.metric(
+                    "Sleeping Giants",
+                    f"{summary['sleeping_giants_count']:,}",
+                    "High reach + Legacy",
+                    delta_color="off"
+                )
+                st.caption("Impact >5k, inactive >30 days")
+
+            with col3:
+                st.metric(
+                    "Legacy Users",
+                    f"{summary['legacy_count']:,}",
+                    f"{summary['legacy_pct']}% stale",
+                    delta_color="inverse"
+                )
+                st.caption("Inactive >30 days")
+
+            with col4:
+                st.metric(
+                    "Avg Days Stale",
+                    f"{int(summary['avg_days_stale'])}",
+                    "days since active",
+                    delta_color="off"
+                )
+                st.caption("Average staleness")
+
+            # Bronze users sub-metric
+            st.markdown(f"**Bronze Users:** {summary['bronze_count']:,} ({summary['bronze_pct']}%) - Active but unverified")
+
+        else:
+            st.warning(f"Could not load summary: {summary_result.get('error', 'Unknown error')}")
+            st.info("Make sure to run migration 008_freshness_view.sql first.")
+
+    except Exception as e:
+        st.error(f"Error loading summary: {str(e)}")
+        st.info("The freshness view may not exist. Run migration 008_freshness_view.sql.")
+
+    # ==========================================
+    # THE SNIPER LIST
+    # ==========================================
+    st.markdown("---")
+    st.markdown("#### The Sniper List")
+    st.markdown("*High-value targets for activation campaigns*")
+
+    # Filters
+    col_filter1, col_filter2, col_filter3 = st.columns(3)
+
+    with col_filter1:
+        trust_filter = st.selectbox(
+            "Trust Status",
+            ["All", "Legacy", "Bronze", "Platinum"],
+            index=1,  # Default to Legacy
+            key="activation_trust_filter"
+        )
+
+    with col_filter2:
+        min_reach = st.slider(
+            "Minimum Impact Score",
+            min_value=0,
+            max_value=100000,
+            value=1000,
+            step=500,
+            format="%d",
+            key="activation_min_reach"
+        )
+
+    with col_filter3:
+        sleeping_giants_only = st.checkbox(
+            "Sleeping Giants Only",
+            value=False,
+            help="Show only high-value (>5k reach) inactive users",
+            key="activation_sleeping_giants"
+        )
+
+    # Fetch data
+    try:
+        report_result = directory_service.get_freshness_report(
+            trust_status=trust_filter if trust_filter != "All" else None,
+            min_impact_score=min_reach,
+            sleeping_giants_only=sleeping_giants_only,
+            limit=100
+        )
+
+        if report_result.get('success') and report_result.get('data'):
+            profiles = report_result['data']
+
+            st.success(f"Found {len(profiles)} profiles matching filters")
+
+            # Display as styled dataframe
+            import pandas as pd
+
+            display_data = []
+            for p in profiles:
+                # Determine row style based on sleeping giant status
+                is_giant = p.get('is_sleeping_giant', False)
+
+                display_data.append({
+                    'Name': p.get('name', 'Unknown'),
+                    'Company': p.get('company', ''),
+                    'Impact Score': f"{p.get('impact_score', 0):,}",
+                    'Trust Status': p.get('current_trust_status', 'Legacy'),
+                    'Days Inactive': p.get('days_since_last_active') or 'Never',
+                    'Niche': (p.get('niche', '') or '')[:30],
+                    'Email': p.get('email', ''),
+                    'Giant': '🔥' if is_giant else ''
+                })
+
+            df = pd.DataFrame(display_data)
+
+            # Style the dataframe - highlight sleeping giants
+            def highlight_giants(row):
+                if row['Giant'] == '🔥':
+                    return ['background-color: #fff3cd'] * len(row)
+                return [''] * len(row)
+
+            styled_df = df.style.apply(highlight_giants, axis=1)
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+            # ==========================================
+            # ACTIVATION ACTIONS
+            # ==========================================
+            st.markdown("---")
+            st.markdown("#### Generate Nudge Email")
+
+            # Profile selector
+            profile_options = {f"{p.get('name', 'Unknown')} ({p.get('company', 'N/A')})": p for p in profiles}
+            selected_profile_key = st.selectbox(
+                "Select Profile to Nudge",
+                options=list(profile_options.keys()),
+                key="activation_profile_select"
+            )
+
+            if selected_profile_key:
+                selected_profile = profile_options[selected_profile_key]
+
+                # Show profile details
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.markdown("**Profile Details:**")
+                    st.markdown(f"- **Name:** {selected_profile.get('name', 'Unknown')}")
+                    st.markdown(f"- **Email:** {selected_profile.get('email', 'N/A')}")
+                    st.markdown(f"- **Niche:** {selected_profile.get('niche', 'N/A')}")
+                    st.markdown(f"- **Impact Score:** {selected_profile.get('impact_score', 0):,}")
+
+                with col2:
+                    st.markdown("**Offer Preview (Bronze Data):**")
+                    offer = selected_profile.get('bronze_offer_preview', 'No offering data')
+                    if offer:
+                        st.info(offer[:200] + "..." if len(offer) > 200 else offer)
+                    else:
+                        st.warning("No offering data available")
+
+                # Intake link input
+                intake_link = st.text_input(
+                    "Intake Form URL",
+                    value="https://your-app.streamlit.app/?page=Post-Event+Check-in",
+                    key="activation_intake_link"
+                )
+
+                # Generate email
+                if st.button("📧 Generate Nudge Email", type="primary", key="activation_generate_email"):
+                    email_text = directory_service.generate_nudge_email(selected_profile, intake_link)
+                    st.text_area(
+                        "Generated Email (Copy & Send)",
+                        value=email_text,
+                        height=250,
+                        key="activation_email_output"
+                    )
+
+                    # Copy button hint
+                    st.caption("Copy the email above and send it to: " + (selected_profile.get('email') or 'N/A'))
+
+            # ==========================================
+            # BULK EXPORT
+            # ==========================================
+            st.markdown("---")
+            st.markdown("#### Bulk Export")
+
+            if st.button("📥 Export Sniper List to CSV", key="activation_export"):
+                import pandas as pd
+
+                export_data = []
+                for p in profiles:
+                    export_data.append({
+                        'Name': p.get('name', ''),
+                        'Company': p.get('company', ''),
+                        'Email': p.get('email', ''),
+                        'Niche': p.get('niche', ''),
+                        'Impact Score': p.get('impact_score', 0),
+                        'Trust Status': p.get('current_trust_status', ''),
+                        'Days Inactive': p.get('days_since_last_active'),
+                        'Offer Preview': p.get('bronze_offer_preview', ''),
+                        'Is Sleeping Giant': p.get('is_sleeping_giant', False)
+                    })
+
+                export_df = pd.DataFrame(export_data)
+                csv = export_df.to_csv(index=False)
+
+                from datetime import datetime
+                st.download_button(
+                    "Download CSV",
+                    data=csv,
+                    file_name=f"activation_sniper_list_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv"
+                )
+
+        elif report_result.get('success') and not report_result.get('data'):
+            st.info("No profiles match the current filters. Try adjusting the filters.")
+        else:
+            st.warning(f"Could not load data: {report_result.get('error', 'Unknown error')}")
+            st.info("Make sure to run migration 008_freshness_view.sql first.")
+
+    except Exception as e:
+        st.error(f"Error loading sniper list: {str(e)}")
+        st.info("The freshness view may not exist. Run migration 008_freshness_view.sql in Supabase.")
+
 
 # ==========================================
 # HELP PAGE

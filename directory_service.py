@@ -1432,3 +1432,164 @@ class DirectoryService:
             return {"success": True}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    # ==========================================
+    # DATA FRESHNESS & ACTIVATION METHODS
+    # ==========================================
+
+    def get_freshness_report(
+        self,
+        trust_status: Optional[str] = None,
+        min_impact_score: int = 0,
+        sleeping_giants_only: bool = False,
+        limit: int = 100
+    ) -> Dict[str, Any]:
+        """
+        Fetch profile freshness data for activation campaigns.
+
+        Args:
+            trust_status: Filter by 'Platinum', 'Bronze', or 'Legacy'
+            min_impact_score: Minimum combined list_size + social_reach
+            sleeping_giants_only: Only show high-value inactive users
+            limit: Max rows to return
+
+        Returns:
+            Dict with success status and data array
+        """
+        try:
+            # Use admin client to bypass RLS
+            admin_client = get_admin_client()
+
+            # Query the freshness view
+            query = admin_client.table("view_profile_freshness") \
+                .select("*")
+
+            # Apply filters
+            if trust_status:
+                query = query.eq("current_trust_status", trust_status)
+
+            if min_impact_score > 0:
+                query = query.gte("impact_score", min_impact_score)
+
+            if sleeping_giants_only:
+                query = query.eq("is_sleeping_giant", True)
+
+            # Order by impact score (high value first) and limit
+            result = query \
+                .order("impact_score", desc=True) \
+                .limit(limit) \
+                .execute()
+
+            return {"success": True, "data": result.data or []}
+
+        except Exception as e:
+            return {"success": False, "error": str(e), "data": []}
+
+    def get_freshness_summary(self) -> Dict[str, Any]:
+        """
+        Get summary statistics for the freshness dashboard.
+
+        Returns:
+            Dict with counts and percentages for each trust status
+        """
+        try:
+            # Use admin client to bypass RLS
+            admin_client = get_admin_client()
+
+            # Get all profiles from freshness view (paginated)
+            page_size = 1000
+            all_profiles = []
+            offset = 0
+            while True:
+                result = admin_client.table("view_profile_freshness") \
+                    .select("current_trust_status, impact_score, is_sleeping_giant, days_since_last_active") \
+                    .range(offset, offset + page_size - 1) \
+                    .execute()
+                if not result.data:
+                    break
+                all_profiles.extend(result.data)
+                if len(result.data) < page_size:
+                    break
+                offset += page_size
+                if offset > 100000:
+                    break
+
+            total = len(all_profiles)
+            if total == 0:
+                return {
+                    "success": True,
+                    "data": {
+                        "total_profiles": 0,
+                        "platinum_count": 0,
+                        "platinum_pct": 0,
+                        "bronze_count": 0,
+                        "bronze_pct": 0,
+                        "legacy_count": 0,
+                        "legacy_pct": 0,
+                        "sleeping_giants_count": 0,
+                        "avg_days_stale": 0
+                    }
+                }
+
+            # Count by trust status
+            platinum = sum(1 for p in all_profiles if p.get('current_trust_status') == 'Platinum')
+            bronze = sum(1 for p in all_profiles if p.get('current_trust_status') == 'Bronze')
+            legacy = sum(1 for p in all_profiles if p.get('current_trust_status') == 'Legacy')
+            sleeping_giants = sum(1 for p in all_profiles if p.get('is_sleeping_giant'))
+
+            # Average days since last active (for non-null values)
+            active_days = [p.get('days_since_last_active') for p in all_profiles
+                          if p.get('days_since_last_active') is not None]
+            avg_days_stale = sum(active_days) / len(active_days) if active_days else 0
+
+            return {
+                "success": True,
+                "data": {
+                    "total_profiles": total,
+                    "platinum_count": platinum,
+                    "platinum_pct": round(100 * platinum / total, 1),
+                    "bronze_count": bronze,
+                    "bronze_pct": round(100 * bronze / total, 1),
+                    "legacy_count": legacy,
+                    "legacy_pct": round(100 * legacy / total, 1),
+                    "sleeping_giants_count": sleeping_giants,
+                    "avg_days_stale": round(avg_days_stale, 0)
+                }
+            }
+
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def generate_nudge_email(self, profile_data: Dict[str, Any], intake_link: str = "https://your-app.com/intake") -> str:
+        """
+        Generate a personalized nudge email for activation.
+
+        Args:
+            profile_data: Row from view_profile_freshness
+            intake_link: URL to the intake form
+
+        Returns:
+            Formatted email text
+        """
+        name = profile_data.get('name', 'there')
+        niche = profile_data.get('niche', 'your industry')
+        offer_preview = profile_data.get('bronze_offer_preview', 'valuable services')
+
+        # Clean up the offer preview
+        if offer_preview and len(offer_preview) > 100:
+            offer_preview = offer_preview[:97] + "..."
+
+        email = f"""Hi {name},
+
+Our AI noticed you're active in {niche}, and we think you offer: "{offer_preview or 'specialized expertise'}".
+
+Is this correct? We have matches waiting for exactly that service.
+
+Click here to verify your profile and unlock your matches: {intake_link}
+
+It only takes 2 minutes, and you'll immediately see who's looking for what you offer.
+
+Best,
+The JV MatchMaker Team"""
+
+        return email
