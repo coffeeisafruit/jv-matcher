@@ -2324,31 +2324,52 @@ Return ONLY "YES" if there's at least one semantic match, or "NO" if none."""
         return total, components
 
     def _generate_reason(self, target: Dict, candidate: Dict, components: Dict, trust_level: str) -> str:
-        """Generate explainable match reason string"""
-        parts = []
+        """
+        Generate human-readable, narrative match reason (World-Class UX).
 
-        if components['intent'] > 0.5:
-            parts.append(f"You need what {candidate.get('name', 'they')} offers")
+        Instead of database-like "Keyword match: X ↔ Y", create sentences like:
+        "They offer Business Coaching, which aligns with your interest in leadership development."
+        """
+        candidate_name = candidate.get('name', 'They').split()[0]  # First name only
 
-        if components['synergy'] > 0.7:
-            parts.append("Strong business alignment")
-        elif components['synergy'] > 0.4:
-            parts.append("Complementary niches")
+        # Primary reason based on highest scoring component
+        primary = None
 
-        if components['momentum'] > 0.8:
-            parts.append("Very active recently")
-        elif components['momentum'] < 0.4:
-            parts.append("Less active (30+ days)")
+        # Intent-based narrative (they have what you need)
+        if components.get('intent', 0) > 0.5:
+            candidate_offering = candidate.get('service_provided') or candidate.get('offering') or candidate.get('business_focus', 'their services')
+            # Truncate if too long
+            if len(candidate_offering) > 60:
+                candidate_offering = candidate_offering[:57] + "..."
+            primary = f"{candidate_name} offers **{candidate_offering}**, which matches what you're looking for"
 
-        if components['context'] > 0:
-            parts.append("Attended same event(s)")
+        # Synergy-based narrative (same/complementary space)
+        elif components.get('synergy', 0) > 0.5:
+            candidate_niche = candidate.get('business_focus') or candidate.get('niche', 'your space')
+            if len(candidate_niche) > 40:
+                candidate_niche = candidate_niche[:37] + "..."
+            primary = f"You're both in the **{candidate_niche}** space with complementary audiences"
 
+        # Keyword fallback with better formatting
+        else:
+            candidate_focus = candidate.get('business_focus') or candidate.get('service_provided', 'business services')
+            if len(candidate_focus) > 50:
+                candidate_focus = candidate_focus[:47] + "..."
+            primary = f"{candidate_name} focuses on **{candidate_focus}**, which could complement your work"
+
+        # Add trust context
+        trust_note = ""
         if trust_level == 'platinum':
-            parts.append("✅ Verified intent")
-        elif trust_level == 'legacy':
-            parts.append("⚠️ Based on profile data")
+            trust_note = " ✅ *Verified intent*"
 
-        return ". ".join(parts) if parts else "Potential partnership opportunity"
+        # Add activity context if notable
+        activity_note = ""
+        if components.get('momentum', 0) > 0.8:
+            activity_note = " • Active this week"
+        elif components.get('context', 0) > 0:
+            activity_note = " • Attended same event"
+
+        return f"{primary}{trust_note}{activity_note}"
 
     def apply_popularity_cap(
         self,
@@ -2527,8 +2548,11 @@ Return ONLY "YES" if there's at least one semantic match, or "NO" if none."""
                 if weighted_score < min_score:
                     continue
 
-                # Add bidirectional matches
-                match_reason = f"Keyword match: {target['offers'][:1]} ↔ {candidate['offers'][:1]}"
+                # Generate human-readable match reason (not database-like)
+                candidate_focus = candidate.get('offers', ['business services'])[0] if candidate.get('offers') else 'business services'
+                if len(candidate_focus) > 50:
+                    candidate_focus = candidate_focus[:47] + "..."
+                match_reason = f"Focuses on **{candidate_focus}**, which could complement your work"
 
                 all_matches.append({
                     'profile_id': target_id,
@@ -2861,19 +2885,34 @@ Return ONLY "YES" if there's at least one semantic match, or "NO" if none."""
 
         print(f"[V1-HYBRID] Trimmed to {len(final_matches)} matches (top {top_n} per profile)")
 
+        # BATCH SAVE - 500 rows per request for ~50x speedup
+        BATCH_SIZE = 500
         saved = 0
         errors = 0
-        for match in final_matches:
+
+        for i in range(0, len(final_matches), BATCH_SIZE):
+            batch = final_matches[i:i + BATCH_SIZE]
             try:
                 self.supabase.table("match_suggestions").upsert(
-                    match,
+                    batch,
                     on_conflict="profile_id,suggested_profile_id"
                 ).execute()
-                saved += 1
+                saved += len(batch)
+                print(f"[V1-HYBRID] Saved batch {i//BATCH_SIZE + 1}: {len(batch)} matches")
             except Exception as e:
-                errors += 1
-                if errors <= 3:
-                    print(f"[V1-HYBRID] Save error: {e}")
+                print(f"[V1-HYBRID] Batch error, falling back to individual saves: {e}")
+                # Fallback to individual saves for this batch
+                for match in batch:
+                    try:
+                        self.supabase.table("match_suggestions").upsert(
+                            match,
+                            on_conflict="profile_id,suggested_profile_id"
+                        ).execute()
+                        saved += 1
+                    except Exception as e2:
+                        errors += 1
+                        if errors <= 3:
+                            print(f"[V1-HYBRID] Save error: {e2}")
 
         total_time = time.time() - start_time
         print(f"[V1-HYBRID] COMPLETE: Saved {saved} matches in {total_time:.1f}s total")

@@ -1595,8 +1595,8 @@ def show_matches():
             else:
                 tier_info = {'tier': 'bronze', 'label': 'Discovery', 'emoji': '👀'}
 
-            # Build expander title with tier badge
-            expander_title = f"**{suggested.get('name', 'Unknown')}** - {score}/100"
+            # Build expander title - HIDE raw score, show ONLY tier badge (World-Class UX)
+            expander_title = f"**{suggested.get('name', 'Unknown')}**"
             if tier_info:
                 expander_title += f" {tier_info['emoji']} {tier_info['label']}"
 
@@ -1614,11 +1614,9 @@ def show_matches():
                         st.markdown(f"**Services:** {suggested['service_provided']}")
 
                 with col2:
-                    # Score with V1.5 tier badge
-                    score_html = f'<span class="match-score">{score}/100</span>'
+                    # Show ONLY tier badge (hide raw score from main view)
                     if tier_info:
-                        score_html += f' <span class="tier-badge tier-{tier_info["tier"]}">{tier_info["emoji"]} {tier_info["label"]}</span>'
-                    st.markdown(score_html, unsafe_allow_html=True)
+                        st.markdown(f'<span class="tier-badge tier-{tier_info["tier"]}">{tier_info["emoji"]} {tier_info["label"]}</span>', unsafe_allow_html=True)
                     if suggested.get('social_reach'):
                         st.caption(f"Reach: {suggested['social_reach']:,}")
                     if suggested.get('list_size'):
@@ -1629,7 +1627,7 @@ def show_matches():
                     if trust_level == 'platinum':
                         st.success("✅ Verified Intent")
                     elif trust_level == 'legacy':
-                        st.warning("⚠️ Profile Data")
+                        st.caption("📋 Profile Data")
 
                 # V1 Score Breakdown Section
                 harmonic_mean = match.get('harmonic_mean')
@@ -1831,12 +1829,25 @@ def show_matches():
                             st.code(body, language=None)
                             st.caption("Copy the message above")
                 else:
-                    st.warning(f"No email on file for {suggested.get('name', 'this contact')}. Copy message and reach out via LinkedIn or their website.")
-                    col_copy, col_spacer = st.columns([1, 3])
+                    # No email - provide LinkedIn deep link (World-Class UX: never leave user stuck)
+                    contact_name = suggested.get('name', 'this contact')
+                    company_name = suggested.get('company', '')
+
+                    # Build LinkedIn search URL
+                    search_query = contact_name
+                    if company_name:
+                        search_query += f" {company_name}"
+                    linkedin_url = f"https://www.linkedin.com/search/results/people/?keywords={urllib.parse.quote(search_query)}"
+
+                    st.info(f"📧 No email on file. Use LinkedIn to connect with {contact_name.split()[0]}.")
+
+                    col_linkedin, col_copy, col_spacer = st.columns([1, 1, 2])
+                    with col_linkedin:
+                        st.markdown(f'<a href="{linkedin_url}" target="_blank"><button style="width:100%;padding:0.5rem;background-color:#0077B5;color:white;border:none;border-radius:0.25rem;cursor:pointer;">🔎 Find on LinkedIn</button></a>', unsafe_allow_html=True)
                     with col_copy:
                         if st.button("📋 Copy Message", key=f"copy_{match['id']}"):
                             st.code(body, language=None)
-                            st.caption("Copy the message above")
+                            st.caption("Copy and paste when you connect")
 
                 # Feedback buttons after contacted
                 if status == 'contacted':
