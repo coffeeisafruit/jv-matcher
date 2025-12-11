@@ -1442,6 +1442,7 @@ class DirectoryService:
         trust_status: Optional[str] = None,
         min_impact_score: int = 0,
         sleeping_giants_only: bool = False,
+        has_email_only: bool = False,
         limit: int = 100
     ) -> Dict[str, Any]:
         """
@@ -1451,6 +1452,7 @@ class DirectoryService:
             trust_status: Filter by 'Platinum', 'Bronze', or 'Legacy'
             min_impact_score: Minimum combined list_size + social_reach
             sleeping_giants_only: Only show high-value inactive users
+            has_email_only: Only show profiles with email addresses (reachable)
             limit: Max rows to return
 
         Returns:
@@ -1473,6 +1475,10 @@ class DirectoryService:
 
             if sleeping_giants_only:
                 query = query.eq("is_sleeping_giant", True)
+
+            # Filter to only profiles with emails (the "Tony Robbins" fix)
+            if has_email_only:
+                query = query.not_.is_("email", "null")
 
             # Order by impact score (high value first) and limit
             result = query \
@@ -1571,23 +1577,45 @@ class DirectoryService:
         Returns:
             Formatted email text
         """
-        name = profile_data.get('name', 'there')
-        niche = profile_data.get('niche', 'your industry')
-        offer_preview = profile_data.get('bronze_offer_preview', 'valuable services')
+        # Handle None values gracefully - the "Tony Robbins Problem"
+        name = profile_data.get('name') or 'there'
+        raw_niche = profile_data.get('niche')
+        raw_offer = profile_data.get('bronze_offer_preview')
+
+        # Graceful fallbacks for missing data
+        niche = raw_niche if raw_niche and raw_niche.lower() != 'none' else 'your industry'
+        offer_preview = raw_offer if raw_offer and raw_offer.lower() != 'none' else None
 
         # Clean up the offer preview
         if offer_preview and len(offer_preview) > 100:
             offer_preview = offer_preview[:97] + "..."
 
-        email = f"""Hi {name},
+        # Build email body based on available data
+        if offer_preview:
+            # We have offer data - use specific template
+            email = f"""Hi {name},
 
-Our AI noticed you're active in {niche}, and we think you offer: "{offer_preview or 'specialized expertise'}".
+Our AI noticed you're active in {niche}, and we think you offer: "{offer_preview}".
 
 Is this correct? We have matches waiting for exactly that service.
 
 Click here to verify your profile and unlock your matches: {intake_link}
 
 It only takes 2 minutes, and you'll immediately see who's looking for what you offer.
+
+Best,
+The JV MatchMaker Team"""
+        else:
+            # No offer data - use generic VIP template
+            email = f"""Hi {name},
+
+We're building a curated network of leaders in {niche}, and your name came up as someone our members would love to connect with.
+
+We'd love to learn more about what you're currently working on and who you'd like to meet.
+
+Click here to complete your profile: {intake_link}
+
+It only takes 2 minutes, and you'll immediately see personalized match recommendations.
 
 Best,
 The JV MatchMaker Team"""

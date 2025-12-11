@@ -3298,12 +3298,27 @@ def show_activation_staleness():
             key="activation_sleeping_giants"
         )
 
+    # Second row of filters
+    col_filter4, col_filter5 = st.columns(2)
+
+    with col_filter4:
+        has_email_only = st.checkbox(
+            "Has Email Only (Reachable)",
+            value=True,  # Default ON - focus on reachable users first
+            help="Only show profiles with email addresses",
+            key="activation_has_email"
+        )
+
+    with col_filter5:
+        st.caption("💡 Enable 'Has Email Only' to focus on users you can actually contact")
+
     # Fetch data
     try:
         report_result = directory_service.get_freshness_report(
             trust_status=trust_filter if trust_filter != "All" else None,
             min_impact_score=min_reach,
             sleeping_giants_only=sleeping_giants_only,
+            has_email_only=has_email_only,
             limit=100
         )
 
@@ -3364,18 +3379,25 @@ def show_activation_staleness():
 
                 with col1:
                     st.markdown("**Profile Details:**")
-                    st.markdown(f"- **Name:** {selected_profile.get('name', 'Unknown')}")
-                    st.markdown(f"- **Email:** {selected_profile.get('email', 'N/A')}")
-                    st.markdown(f"- **Niche:** {selected_profile.get('niche', 'N/A')}")
+                    profile_name = selected_profile.get('name') or 'Unknown'
+                    profile_email = selected_profile.get('email') or 'N/A'
+                    profile_niche = selected_profile.get('niche') or 'N/A'
+                    st.markdown(f"- **Name:** {profile_name}")
+                    st.markdown(f"- **Email:** {profile_email}")
+                    st.markdown(f"- **Niche:** {profile_niche}")
                     st.markdown(f"- **Impact Score:** {selected_profile.get('impact_score', 0):,}")
+
+                    # Warning if no email
+                    if not selected_profile.get('email'):
+                        st.warning("⚠️ No email - cannot contact directly")
 
                 with col2:
                     st.markdown("**Offer Preview (Bronze Data):**")
-                    offer = selected_profile.get('bronze_offer_preview', 'No offering data')
-                    if offer:
+                    offer = selected_profile.get('bronze_offer_preview')
+                    if offer and offer.lower() != 'none':
                         st.info(offer[:200] + "..." if len(offer) > 200 else offer)
                     else:
-                        st.warning("No offering data available")
+                        st.warning("No offering data available - will use VIP template")
 
                 # Intake link input
                 intake_link = st.text_input(
