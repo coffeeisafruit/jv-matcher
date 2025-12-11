@@ -922,6 +922,7 @@ class DirectoryService:
         verified_offers: List[str],
         verified_needs: List[str],
         match_preference: str,
+        match_preferences: Optional[List[str]] = None,
         suggested_offers: Optional[List[str]] = None,
         suggested_needs: Optional[List[str]] = None
     ) -> Dict[str, Any]:
@@ -929,10 +930,16 @@ class DirectoryService:
         try:
             from datetime import datetime
 
-            # Validate match_preference
+            # Validate match_preference(s)
             valid_preferences = ['Peer_Bundle', 'Referral_Upstream', 'Referral_Downstream', 'Service_Provider']
             if match_preference not in valid_preferences:
                 return {"success": False, "error": f"Invalid match_preference. Must be one of: {valid_preferences}"}
+
+            # Validate all preferences in list if provided
+            if match_preferences:
+                for pref in match_preferences:
+                    if pref not in valid_preferences:
+                        return {"success": False, "error": f"Invalid preference '{pref}'. Must be one of: {valid_preferences}"}
 
             insert_data = {
                 "profile_id": profile_id,
@@ -943,6 +950,10 @@ class DirectoryService:
                 "match_preference": match_preference,
                 "confirmed_at": datetime.utcnow().isoformat()
             }
+
+            # Add match_preferences array if provided
+            if match_preferences:
+                insert_data["match_preferences"] = match_preferences
 
             # Add optional fields if provided
             if suggested_offers is not None:

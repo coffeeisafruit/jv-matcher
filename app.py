@@ -1897,25 +1897,34 @@ def show_post_event_intake(event_name: str = None, event_id: str = None):
 
         st.markdown("---")
         st.markdown("### Match Type Preference")
-        st.caption("What kind of partnership are you primarily looking for?")
+        st.caption("What kinds of partnerships are you looking for? (Select all that apply)")
 
-        match_preference = st.radio(
-            "Match Type",
-            options=[
-                "Peer_Bundle",
-                "Referral_Upstream",
-                "Referral_Downstream",
-                "Service_Provider"
-            ],
-            format_func=lambda x: {
-                "Peer_Bundle": "🤝 Peer/Bundle - Same niche, let's collaborate",
-                "Referral_Upstream": "⬆️ Referral Partner - Serves clients BEFORE they need me",
-                "Referral_Downstream": "⬇️ Referral Partner - Serves clients AFTER they work with me",
-                "Service_Provider": "🔧 Service Provider - A vendor/service I need"
-            }[x],
-            key="match_preference",
-            label_visibility="collapsed"
-        )
+        # Multi-select with checkboxes
+        col1, col2 = st.columns(2)
+        with col1:
+            pref_peer = st.checkbox("🤝 Peer/Bundle - Same niche, let's collaborate", key="pref_peer")
+            pref_upstream = st.checkbox("⬆️ Referral - Serves clients BEFORE me", key="pref_upstream")
+        with col2:
+            pref_downstream = st.checkbox("⬇️ Referral - Serves clients AFTER me", key="pref_downstream")
+            pref_service = st.checkbox("🔧 Service Provider - A vendor I need", key="pref_service")
+
+        # Build list of selected preferences
+        match_preferences = []
+        if pref_peer:
+            match_preferences.append("Peer_Bundle")
+        if pref_upstream:
+            match_preferences.append("Referral_Upstream")
+        if pref_downstream:
+            match_preferences.append("Referral_Downstream")
+        if pref_service:
+            match_preferences.append("Service_Provider")
+
+        # Default to Peer_Bundle if nothing selected
+        if not match_preferences:
+            match_preferences = ["Peer_Bundle"]
+
+        # For backward compatibility, use first preference as primary
+        match_preference = match_preferences[0]
 
         # Submit button
         submitted = st.form_submit_button("✅ Confirm & Update My Matches", type="primary", use_container_width=True)
@@ -1942,6 +1951,7 @@ def show_post_event_intake(event_name: str = None, event_id: str = None):
                     verified_offers=verified_offers,
                     verified_needs=verified_needs,
                     match_preference=match_preference,
+                    match_preferences=match_preferences,
                     suggested_offers=suggested_offers,
                     suggested_needs=suggested_needs
                 )

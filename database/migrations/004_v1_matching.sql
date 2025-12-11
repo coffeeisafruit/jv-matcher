@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS public.intake_submissions (
     verified_offers TEXT[] NOT NULL DEFAULT '{}',
     verified_needs TEXT[] NOT NULL DEFAULT '{}',
 
-    -- Match preference drives Synergy Score logic
+    -- Match preference drives Synergy Score logic (primary preference for backward compat)
     -- Peer_Bundle: Same niche collaboration
     -- Referral_Upstream: They serve clients BEFORE they need you
     -- Referral_Downstream: They serve clients AFTER they work with you
@@ -27,6 +27,9 @@ CREATE TABLE IF NOT EXISTS public.intake_submissions (
         'Referral_Downstream',
         'Service_Provider'
     )),
+
+    -- Multi-select preferences (all selected types)
+    match_preferences TEXT[] DEFAULT '{}',
 
     -- AI suggestions (Bronze trust - for pre-fill only)
     suggested_offers TEXT[],
